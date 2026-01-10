@@ -660,10 +660,11 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
                     if success and temp_final.exists():
                         final_path = storage.save_final_clip(session_id, temp_final)
                         if final_path:
-                            final_clip_placeholder.success(
-                                f"🎬 **結合動画を保存しました**\n\n"
-                                f"📁 `{final_path}`"
-                            )
+                            final_clip_placeholder.empty()
+                            with final_clip_container:
+                                st.success("🎬 結合動画を保存しました")
+                                st.video(str(final_path))
+                                st.caption(f"📁 `{final_path}`")
                             logger.info(f"[APP] Final clip保存完了: {final_path}")
                         else:
                             final_clip_placeholder.warning("動画結合は成功しましたが、保存に失敗しました。")
