@@ -59,3 +59,28 @@ PinPoint.video プロジェクトの初期構築（uv環境）
 - google-genai SDK（旧google-generativeaiは2025/11/30でサポート終了）を使用
 
 ---
+
+[2026-01-10 12:08:56]
+
+## 作業内容
+
+README多言語対応
+
+### 実施した作業
+
+- README.mdを英語版に書き換え
+- 日本語版README（README_ja.md）を新規作成
+- 中国語版README（README_zh.md）を新規作成
+- 各READMEに他言語版へのリンクを追加
+
+### 変更したファイル
+
+- `README.md` - 英語版に書き換え、多言語リンク追加
+- `README_ja.md` - 日本語版を新規作成
+- `README_zh.md` - 中国語版を新規作成
+
+### 備考
+
+- メインREADMEは英語で記述し、日本語・中国語版は別ファイルとして参照する構成
+
+---

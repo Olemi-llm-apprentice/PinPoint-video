@@ -1,27 +1,29 @@
 # 🎯 PinPoint.video
 
-YouTube動画から、ユーザーが求める情報が含まれる部分だけをピンポイントで抽出し、タイムスタンプ付きリンクとして提供するAIツール。
+An AI-powered tool that extracts specific segments from YouTube videos based on user queries and provides timestamped links for instant access.
 
-## 🎯 解決する課題
+**[日本語](./README_ja.md)** | **[中文](./README_zh.md)**
 
-- 20分の動画の中で、必要な情報は40秒しかないのに、全編を視聴する時間の無駄
-- 2時間のカンファレンス動画から特定のトピックを探す困難さ
-- 技術チュートリアル動画で「この機能の使い方だけ知りたい」というニーズ
+## 🎯 Problem Statement
 
-## 🚀 主要な価値
+- Wasting time watching a 20-minute video when you only need 40 seconds of information
+- Difficulty finding specific topics in 2-hour conference recordings
+- "I just want to know how to use this feature" in technical tutorials
 
-- **時間短縮**: 20分 → 40秒（必要な部分だけ）
-- **精度**: AIによる内容理解で、字幕検索より高精度
-- **即座にアクセス**: タイムスタンプ付きYouTubeリンクで即座に該当部分へ
+## 🚀 Key Value
 
-## 📋 必要条件
+- **Time Savings**: 20 min → 40 sec (only the relevant parts)
+- **Precision**: AI-powered content understanding, more accurate than subtitle search
+- **Instant Access**: Timestamped YouTube links for immediate navigation
+
+## 📋 Requirements
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (Pythonパッケージマネージャー)
-- ffmpeg (動画処理)
-- yt-dlp (YouTube動画ダウンロード)
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- ffmpeg (video processing)
+- yt-dlp (YouTube video extraction)
 
-### システム依存のインストール
+### System Dependencies Installation
 
 **Windows (winget):**
 ```powershell
@@ -40,62 +42,62 @@ sudo apt-get install ffmpeg
 pip install yt-dlp
 ```
 
-## 🛠️ セットアップ
+## 🛠️ Setup
 
-### 1. リポジトリをクローン
+### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/pinpoint-video.git
-cd pinpoint-video
+git clone https://github.com/Olemi-llm-apprentice/PinPoint-video.git
+cd PinPoint-video
 ```
 
-### 2. 依存関係をインストール
+### 2. Install dependencies
 
 ```bash
 uv sync
 ```
 
-### 3. 環境変数を設定
+### 3. Configure environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` ファイルを編集して、以下のAPIキーを設定してください：
+Edit the `.env` file and set the following API keys:
 
-- `YOUTUBE_API_KEY`: [Google Cloud Console](https://console.cloud.google.com/)でYouTube Data API v3を有効化して取得
-- `GEMINI_API_KEY`: [Google AI Studio](https://aistudio.google.com/)で取得
+- `YOUTUBE_API_KEY`: Enable YouTube Data API v3 at [Google Cloud Console](https://console.cloud.google.com/)
+- `GEMINI_API_KEY`: Get from [Google AI Studio](https://aistudio.google.com/)
 
-### 4. アプリケーションを起動
+### 4. Run the application
 
 ```bash
 uv run streamlit run app/main.py
 ```
 
-ブラウザで http://localhost:8501 を開いてください。
+Open http://localhost:8501 in your browser.
 
-## 📁 プロジェクト構成
+## 📁 Project Structure
 
 ```
 pinpoint_video/
 ├── app/
-│   └── main.py                    # Streamlit エントリポイント
+│   └── main.py                    # Streamlit entry point
 ├── src/
 │   ├── domain/
 │   │   ├── entities.py            # Video, Subtitle, TimeRange, SearchResult
-│   │   ├── exceptions.py          # ドメイン固有の例外
-│   │   └── time_utils.py          # 時間変換ユーティリティ
+│   │   ├── exceptions.py          # Domain-specific exceptions
+│   │   └── time_utils.py          # Time conversion utilities
 │   ├── application/
-│   │   ├── interfaces/            # Protocol定義
-│   │   └── usecases/              # ユースケース実装
+│   │   ├── interfaces/            # Protocol definitions
+│   │   └── usecases/              # Use case implementations
 │   └── infrastructure/
 │       ├── youtube_data_api.py    # YouTube Data API v3
 │       ├── youtube_transcript.py  # youtube-transcript-api
 │       ├── ytdlp_extractor.py     # yt-dlp + ffmpeg
-│       ├── gemini_llm_client.py   # Gemini Flash (テキスト)
-│       └── gemini_vlm_client.py   # Gemini Pro Vision (動画)
+│       ├── gemini_llm_client.py   # Gemini Flash (text)
+│       └── gemini_vlm_client.py   # Gemini Pro Vision (video)
 ├── config/
-│   └── settings.py                # 設定管理
+│   └── settings.py                # Settings management
 ├── tests/
 │   ├── unit/
 │   └── integration/
@@ -104,40 +106,46 @@ pinpoint_video/
 └── README.md
 ```
 
-## 🔄 処理フロー
+## 🔄 Processing Flow
 
-1. **クエリ変換** (1-2秒): ユーザークエリをYouTube検索に最適化
-2. **YouTube検索** (1-2秒): 関連動画を検索・フィルタリング
-3. **字幕分析** (2-3秒): 字幕からAIで該当範囲を粗く特定
-4. **精密分析** (10-30秒/動画): 部分ダウンロード + VLMで精密時刻特定
-5. **結果表示**: タイムスタンプ付きYouTube埋め込み
+1. **Query Conversion** (1-2s): Optimize user query for YouTube search
+2. **YouTube Search** (1-2s): Search and filter relevant videos
+3. **Subtitle Analysis** (2-3s): AI identifies rough time ranges from subtitles
+4. **Precision Analysis** (10-30s/video): Partial download + VLM for precise timestamps
+5. **Display Results**: YouTube embed with timestamps
 
-**合計処理時間**: 30秒〜1分
+**Total Processing Time**: 30 seconds to 1 minute
 
-## 🧪 テスト実行
+## 🧪 Running Tests
 
 ```bash
 uv run pytest tests/
 ```
 
-## 📝 設定オプション
+## 📝 Configuration Options
 
-| 環境変数 | デフォルト | 説明 |
-|---------|-----------|------|
-| `MAX_SEARCH_RESULTS` | 10 | YouTube検索結果の最大取得件数 |
-| `MAX_FINAL_RESULTS` | 5 | 最終的に表示するセグメント数 |
-| `BUFFER_RATIO` | 0.2 | クリップ抽出時のバッファ割合 |
-| `ENABLE_VLM_REFINEMENT` | true | VLM精密分析の有効/無効 |
-| `DURATION_MIN_SEC` | 60 | 対象動画の最小長さ（秒） |
-| `DURATION_MAX_SEC` | 1800 | 対象動画の最大長さ（秒） |
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `DEFAULT_MODEL` | gemini-2.5-flash | Default LLM model |
+| `QUERY_CONVERT_MODEL` | (DEFAULT_MODEL) | Model for query conversion |
+| `SUBTITLE_ANALYSIS_MODEL` | (DEFAULT_MODEL) | Model for subtitle analysis |
+| `VIDEO_ANALYSIS_MODEL` | (DEFAULT_MODEL) | Model for video analysis (VLM) |
+| `MAX_SEARCH_RESULTS` | 30 | Maximum YouTube search results |
+| `MAX_FINAL_RESULTS` | 5 | Number of segments to display |
+| `BUFFER_RATIO` | 0.2 | Buffer ratio for clip extraction |
+| `ENABLE_VLM_REFINEMENT` | true | Enable/disable VLM precision analysis |
+| `DURATION_MIN_SEC` | 60 | Minimum video length (seconds) |
+| `DURATION_MAX_SEC` | 7200 | Maximum video length (seconds) |
+| `PUBLISHED_AFTER` | - | Filter videos published after this date (ISO 8601) |
+| `PUBLISHED_BEFORE` | - | Filter videos published before this date (ISO 8601) |
 
-## ⚠️ 制限事項
+## ⚠️ Limitations
 
-- 字幕なし動画は処理不可（将来Whisper統合予定）
-- 動画長上限: 1時間（gemini-2.5-flash）
-- 言語: 日本語・英語のみ
-- YouTube Data API の日次クォータ制限（10,000ユニット/日）
+- Videos without subtitles cannot be processed (Whisper integration planned)
+- Maximum video length: 1 hour (gemini-2.5-flash)
+- Languages: Japanese and English only
+- YouTube Data API daily quota limit (10,000 units/day)
 
-## 📄 ライセンス
+## 📄 License
 
 MIT License
