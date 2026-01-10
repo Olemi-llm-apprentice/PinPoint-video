@@ -1,6 +1,7 @@
 """Gemini VLM クライアント（動画分析用）"""
 
 import json
+import time
 from pathlib import Path
 
 from google import genai
@@ -39,6 +40,45 @@ class GeminiVLMClient:
             self.client = genai.Client()
 
         self.video_analysis_model = video_analysis_model
+
+    def _wait_for_file_active(
+        self,
+        file_name: str,
+        timeout_sec: float = 60.0,
+        poll_interval_sec: float = 0.5,
+    ) -> None:
+        """
+        アップロードしたファイルがACTIVE状態になるまで待機
+
+        Args:
+            file_name: ファイル名（アップロード時に返されたもの）
+            timeout_sec: タイムアウト秒数
+            poll_interval_sec: ポーリング間隔
+
+        Raises:
+            VLMError: タイムアウトまたはファイル処理失敗
+        """
+        start_time = time.time()
+        while True:
+            file_info = self.client.files.get(name=file_name)
+            state = file_info.state.name if hasattr(file_info.state, 'name') else str(file_info.state)
+            
+            if state == "ACTIVE":
+                logger.debug(f"  ファイル状態: ACTIVE（処理完了）")
+                return
+            
+            if state == "FAILED":
+                raise VLMError(f"File processing failed: {file_name}")
+            
+            elapsed = time.time() - start_time
+            if elapsed >= timeout_sec:
+                raise VLMError(
+                    f"Timeout waiting for file to become ACTIVE: {file_name} "
+                    f"(state={state}, elapsed={elapsed:.1f}s)"
+                )
+            
+            logger.debug(f"  ファイル状態: {state}、待機中... ({elapsed:.1f}s)")
+            time.sleep(poll_interval_sec)
 
     @trace_llm(name="analyze_video_clip", metadata={"purpose": "video_analysis"})
     def analyze_video_clip(
@@ -79,6 +119,9 @@ class GeminiVLMClient:
             logger.debug(f"  ファイルアップロード開始...")
             video_file = self.client.files.upload(file=video_path)
             logger.debug(f"  ファイルアップロード完了: {video_file.name}")
+
+            # ファイルがACTIVE状態になるまで待機
+            self._wait_for_file_active(video_file.name)
 
             prompt = f"""あなたは動画内容分析の専門家です。
 

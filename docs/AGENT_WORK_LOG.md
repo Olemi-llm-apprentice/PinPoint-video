@@ -136,3 +136,52 @@ YouTube検索の精度向上のためマルチクエリ・マルチ戦略検索�
 - 3クエリ × 3戦略 = 最大9回の検索を実行し、重複排除して母数を増やす設計
 
 ---
+
+[2026-01-10 13:35:00]
+
+## 作業内容
+
+UI/UX改善とセッション履歴機能の実装
+
+### 実施した作業
+
+1. **詳細プログレス表示の実装**
+   - `ProgressDetails`データクラス追加（phase, step, details）
+   - 各処理フェーズで詳細情報を送信するように変更
+   - フェーズ別アイコン表示（🔄🔍📝🎬✅）
+   - 詳細ステータスexpanderでリアルタイム情報表示
+
+2. **LangSmithトレース改善**
+   - 毎回新しい`run_id`（UUID）を生成して上書き防止
+   - 自動的にセッションID・タイムスタンプをmetadataに追加
+   - `.env`ファイルの読み込み問題を修正（`load_dotenv()`追加）
+   - `is_langsmith_enabled()`がSettingsから値を取得するように変更
+
+3. **セッション履歴機能の実装**
+   - `SessionStorage`クラス新規作成（履歴の永続化）
+   - 各セッションごとに保存: metadata.json, result.json, result.md, log.txt, clips/
+   - サイドバーに検索履歴一覧をChatGPT風に表示
+   - 履歴選択で過去の結果を表示（結果/クリップ/ログ/Markdownタブ）
+   - 動画クリップの保存オプション追加
+   - 履歴の削除機能
+
+4. **その他の修正**
+   - `main.py`でプロジェクトルートをsys.pathに追加
+   - `.gitignore`に`outputs/`ディレクトリを追加
+
+### 変更したファイル
+
+- `app/main.py` - 履歴UI、詳細プログレス表示、dotenv読み込み追加
+- `src/application/usecases/extract_segments.py` - ProgressDetails追加、clip_save_callback追加
+- `src/infrastructure/logging_config.py` - LangSmithトレース改善
+- `src/infrastructure/session_storage.py` - 新規作成（履歴管理）
+- `.gitignore` - outputs/追加
+- `outputs/.gitkeep` - 新規作成
+
+### 備考
+
+- 検索結果は`outputs/`ディレクトリにセッションごとに保存される
+- VLM精密分析時のクリップも保存可能（オプション）
+- LangSmithトレースは毎回新しいIDで記録され、上書きされない
+
+---

@@ -1,0 +1,360 @@
+"""セッション履歴の永続化ストレージ"""
+
+import json
+import shutil
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from src.domain.entities import SearchResult, TimeRange, Video, VideoSegment
+from src.infrastructure.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+# デフォルトの出力ディレクトリ
+DEFAULT_OUTPUT_DIR = Path("outputs")
+
+
+@dataclass
+class SessionMetadata:
+    """セッションのメタデータ"""
+
+    session_id: str
+    query: str
+    created_at: str  # ISO format
+    segment_count: int
+    processing_time_sec: float
+    vlm_enabled: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "query": self.query,
+            "created_at": self.created_at,
+            "segment_count": self.segment_count,
+            "processing_time_sec": self.processing_time_sec,
+            "vlm_enabled": self.vlm_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SessionMetadata":
+        return cls(
+            session_id=data["session_id"],
+            query=data["query"],
+            created_at=data["created_at"],
+            segment_count=data["segment_count"],
+            processing_time_sec=data["processing_time_sec"],
+            vlm_enabled=data.get("vlm_enabled", True),
+        )
+
+
+def _video_to_dict(video: Video) -> dict[str, Any]:
+    """VideoをJSON化"""
+    return {
+        "video_id": video.video_id,
+        "title": video.title,
+        "channel_name": video.channel_name,
+        "duration_sec": video.duration_sec,
+        "published_at": video.published_at,
+        "thumbnail_url": video.thumbnail_url,
+    }
+
+
+def _video_from_dict(data: dict[str, Any]) -> Video:
+    """JSONからVideoを復元"""
+    return Video(
+        video_id=data["video_id"],
+        title=data["title"],
+        channel_name=data["channel_name"],
+        duration_sec=data["duration_sec"],
+        published_at=data["published_at"],
+        thumbnail_url=data["thumbnail_url"],
+    )
+
+
+def _time_range_to_dict(tr: TimeRange) -> dict[str, float]:
+    """TimeRangeをJSON化"""
+    return {
+        "start_sec": tr.start_sec,
+        "end_sec": tr.end_sec,
+    }
+
+
+def _time_range_from_dict(data: dict[str, float]) -> TimeRange:
+    """JSONからTimeRangeを復元"""
+    return TimeRange(
+        start_sec=data["start_sec"],
+        end_sec=data["end_sec"],
+    )
+
+
+def _segment_to_dict(segment: VideoSegment) -> dict[str, Any]:
+    """VideoSegmentをJSON化"""
+    return {
+        "video": _video_to_dict(segment.video),
+        "time_range": _time_range_to_dict(segment.time_range),
+        "summary": segment.summary,
+        "confidence": segment.confidence,
+    }
+
+
+def _segment_from_dict(data: dict[str, Any]) -> VideoSegment:
+    """JSONからVideoSegmentを復元"""
+    return VideoSegment(
+        video=_video_from_dict(data["video"]),
+        time_range=_time_range_from_dict(data["time_range"]),
+        summary=data["summary"],
+        confidence=data["confidence"],
+    )
+
+
+def search_result_to_dict(result: SearchResult) -> dict[str, Any]:
+    """SearchResultをJSON化"""
+    return {
+        "query": result.query,
+        "segments": [_segment_to_dict(s) for s in result.segments],
+        "processing_time_sec": result.processing_time_sec,
+    }
+
+
+def search_result_from_dict(data: dict[str, Any]) -> SearchResult:
+    """JSONからSearchResultを復元"""
+    return SearchResult(
+        query=data["query"],
+        segments=[_segment_from_dict(s) for s in data["segments"]],
+        processing_time_sec=data["processing_time_sec"],
+    )
+
+
+def generate_result_markdown(result: SearchResult, metadata: SessionMetadata) -> str:
+    """検索結果をMarkdown形式で出力"""
+    lines = [
+        f"# PinPoint.video 検索結果",
+        f"",
+        f"**検索クエリ:** {result.query}",
+        f"",
+        f"**実行日時:** {metadata.created_at}",
+        f"**処理時間:** {result.processing_time_sec:.1f}秒",
+        f"**VLM精密分析:** {'有効' if metadata.vlm_enabled else '無効'}",
+        f"",
+        f"---",
+        f"",
+        f"## 検索結果: {len(result.segments)}件",
+        f"",
+    ]
+
+    for i, segment in enumerate(result.segments, 1):
+        start_min = int(segment.time_range.start_sec // 60)
+        start_sec = int(segment.time_range.start_sec % 60)
+        end_min = int(segment.time_range.end_sec // 60)
+        end_sec = int(segment.time_range.end_sec % 60)
+
+        lines.extend([
+            f"### {i}. {segment.video.title}",
+            f"",
+            f"- **チャンネル:** {segment.video.channel_name}",
+            f"- **時間範囲:** {start_min}:{start_sec:02d} - {end_min}:{end_sec:02d}",
+            f"- **確信度:** {segment.confidence:.0%}",
+            f"- **要約:** {segment.summary}",
+            f"",
+            f"**リンク:**",
+            f"- [元動画を開く](https://youtube.com/watch?v={segment.video.video_id}&t={int(segment.time_range.start_sec)})",
+            f"- 埋め込みURL: `{segment.embed_url}`",
+            f"",
+        ])
+
+    return "\n".join(lines)
+
+
+class SessionStorage:
+    """セッション履歴を管理するストレージ"""
+
+    def __init__(self, output_dir: Path | None = None):
+        self.output_dir = output_dir or DEFAULT_OUTPUT_DIR
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"SessionStorage initialized: {self.output_dir}")
+
+    def _generate_session_id(self, query: str) -> str:
+        """セッションIDを生成"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # クエリの最初の20文字をサニタイズして使用
+        safe_query = "".join(c if c.isalnum() else "_" for c in query[:20])
+        return f"{timestamp}_{safe_query}"
+
+    def _get_session_dir(self, session_id: str) -> Path:
+        """セッションのディレクトリパスを取得"""
+        return self.output_dir / session_id
+
+    def save_session(
+        self,
+        result: SearchResult,
+        vlm_enabled: bool,
+        logs: list[str] | None = None,
+    ) -> str:
+        """
+        セッションを保存
+
+        Args:
+            result: 検索結果
+            vlm_enabled: VLM精密分析が有効だったか
+            logs: 処理ログのリスト
+
+        Returns:
+            セッションID
+        """
+        session_id = self._generate_session_id(result.query)
+        session_dir = self._get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # メタデータ
+        metadata = SessionMetadata(
+            session_id=session_id,
+            query=result.query,
+            created_at=datetime.now().isoformat(),
+            segment_count=len(result.segments),
+            processing_time_sec=result.processing_time_sec,
+            vlm_enabled=vlm_enabled,
+        )
+
+        # metadata.json
+        with open(session_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata.to_dict(), f, ensure_ascii=False, indent=2)
+
+        # result.json
+        with open(session_dir / "result.json", "w", encoding="utf-8") as f:
+            json.dump(search_result_to_dict(result), f, ensure_ascii=False, indent=2)
+
+        # result.md
+        markdown_content = generate_result_markdown(result, metadata)
+        with open(session_dir / "result.md", "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+
+        # log.txt
+        if logs:
+            with open(session_dir / "log.txt", "w", encoding="utf-8") as f:
+                f.write("\n".join(logs))
+
+        # clipsディレクトリを作成
+        clips_dir = session_dir / "clips"
+        clips_dir.mkdir(exist_ok=True)
+
+        logger.info(f"Session saved: {session_id}")
+        return session_id
+
+    def save_clip(self, session_id: str, video_id: str, clip_path: Path) -> Path | None:
+        """
+        動画クリップをセッションに保存
+
+        Args:
+            session_id: セッションID
+            video_id: 動画ID
+            clip_path: 元のクリップファイルパス
+
+        Returns:
+            保存先のパス（失敗時はNone）
+        """
+        session_dir = self._get_session_dir(session_id)
+        clips_dir = session_dir / "clips"
+        clips_dir.mkdir(exist_ok=True)
+
+        dest_path = clips_dir / f"{video_id}.mp4"
+        try:
+            shutil.copy2(clip_path, dest_path)
+            logger.debug(f"Clip saved: {dest_path}")
+            return dest_path
+        except Exception as e:
+            logger.error(f"Failed to save clip: {e}")
+            return None
+
+    def list_sessions(self, limit: int = 50) -> list[SessionMetadata]:
+        """
+        セッション一覧を取得（新しい順）
+
+        Args:
+            limit: 最大取得件数
+
+        Returns:
+            セッションメタデータのリスト
+        """
+        sessions = []
+        
+        if not self.output_dir.exists():
+            return sessions
+
+        # ディレクトリを新しい順にソート
+        session_dirs = sorted(
+            [d for d in self.output_dir.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+
+        for session_dir in session_dirs[:limit]:
+            metadata_path = session_dir / "metadata.json"
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    sessions.append(SessionMetadata.from_dict(data))
+                except Exception as e:
+                    logger.warning(f"Failed to load session metadata: {session_dir} - {e}")
+
+        return sessions
+
+    def load_session(self, session_id: str) -> tuple[SessionMetadata, SearchResult] | None:
+        """
+        セッションを読み込む
+
+        Args:
+            session_id: セッションID
+
+        Returns:
+            (メタデータ, 検索結果) または None
+        """
+        session_dir = self._get_session_dir(session_id)
+        
+        if not session_dir.exists():
+            logger.warning(f"Session not found: {session_id}")
+            return None
+
+        try:
+            # メタデータ読み込み
+            with open(session_dir / "metadata.json", encoding="utf-8") as f:
+                metadata = SessionMetadata.from_dict(json.load(f))
+
+            # 結果読み込み
+            with open(session_dir / "result.json", encoding="utf-8") as f:
+                result = search_result_from_dict(json.load(f))
+
+            return metadata, result
+        except Exception as e:
+            logger.error(f"Failed to load session: {session_id} - {e}")
+            return None
+
+    def get_session_clips(self, session_id: str) -> list[Path]:
+        """セッションのクリップファイル一覧を取得"""
+        clips_dir = self._get_session_dir(session_id) / "clips"
+        if not clips_dir.exists():
+            return []
+        return list(clips_dir.glob("*.mp4"))
+
+    def get_session_log(self, session_id: str) -> str | None:
+        """セッションのログを取得"""
+        log_path = self._get_session_dir(session_id) / "log.txt"
+        if not log_path.exists():
+            return None
+        with open(log_path, encoding="utf-8") as f:
+            return f.read()
+
+    def delete_session(self, session_id: str) -> bool:
+        """セッションを削除"""
+        session_dir = self._get_session_dir(session_id)
+        if not session_dir.exists():
+            return False
+        try:
+            shutil.rmtree(session_dir)
+            logger.info(f"Session deleted: {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete session: {session_id} - {e}")
+            return False

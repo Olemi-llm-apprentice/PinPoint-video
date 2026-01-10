@@ -3,6 +3,8 @@
 import logging
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable, TypeVar
 
@@ -78,11 +80,29 @@ def is_langsmith_enabled() -> bool:
     if not LANGSMITH_AVAILABLE:
         return False
     
-    # 環境変数でトレーシングが有効か確認
-    tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() in ("true", "1", "yes")
-    api_key_set = bool(os.getenv("LANGSMITH_API_KEY"))
+    # Settingsから値を取得（.envファイルを読み込む）
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        return settings.LANGSMITH_TRACING and bool(settings.LANGSMITH_API_KEY)
+    except Exception:
+        # Settingsが使えない場合は環境変数から直接取得
+        tracing_enabled = os.getenv("LANGSMITH_TRACING", "").lower() in ("true", "1", "yes")
+        api_key_set = bool(os.getenv("LANGSMITH_API_KEY"))
+        return tracing_enabled and api_key_set
+
+
+def generate_trace_metadata() -> dict[str, Any]:
+    """
+    トレース用のメタデータを生成
     
-    return tracing_enabled and api_key_set
+    各トレースを一意に識別するためのセッションIDとタイムスタンプを含む
+    """
+    return {
+        "session_id": str(uuid.uuid4())[:8],  # 短縮UUID
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp_local": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def trace_llm(
@@ -94,6 +114,7 @@ def trace_llm(
     LLM呼び出しをトレースするデコレータ
     
     LangSmithが無効の場合はパススルー
+    各呼び出しで新しいrun_idを生成し、トレースが上書きされないようにする
     
     Args:
         name: トレース名（デフォルトは関数名）
@@ -107,13 +128,29 @@ def trace_llm(
     """
     def decorator(func: F) -> F:
         if is_langsmith_enabled() and traceable is not None:
-            # LangSmithが有効な場合はtraceableでラップ
-            traced_func = traceable(
-                name=name or func.__name__,
-                run_type=run_type,
-                metadata=metadata or {},
-            )(func)
-            return traced_func  # type: ignore
+            @wraps(func)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                # 毎回新しいrun_idとmetadataを生成
+                run_id = uuid.uuid4()
+                trace_meta = generate_trace_metadata()
+                
+                # ユーザー指定のmetadataとマージ
+                combined_metadata = {
+                    **(metadata or {}),
+                    **trace_meta,
+                }
+                
+                # traceableでラップして実行
+                traced_func = traceable(
+                    name=name or func.__name__,
+                    run_type=run_type,
+                    metadata=combined_metadata,
+                    run_id=run_id,
+                )(func)
+                
+                return traced_func(*args, **kwargs)
+            
+            return wrapper  # type: ignore
         else:
             # LangSmithが無効な場合はそのまま返す
             return func

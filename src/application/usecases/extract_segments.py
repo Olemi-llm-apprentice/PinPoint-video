@@ -25,6 +25,15 @@ logger = get_logger(__name__)
 
 
 @dataclass
+class ProgressDetails:
+    """進捗の詳細情報"""
+
+    phase: str  # 現在のフェーズ名
+    step: str  # 現在のステップの説明
+    details: dict | None = None  # 追加の詳細情報
+
+
+@dataclass
 class ExtractSegmentsConfig:
     """ユースケースの設定"""
 
@@ -62,14 +71,17 @@ class ExtractSegmentsUseCase:
     def execute(
         self,
         user_query: str,
-        progress_callback: Callable[[str, float], None] | None = None,
+        progress_callback: Callable[[ProgressDetails, float], None] | None = None,
+        clip_save_callback: Callable[[str, Path], None] | None = None,
     ) -> SearchResult:
         """
         メイン実行フロー
 
         Args:
             user_query: ユーザーの検索クエリ
-            progress_callback: 進捗コールバック (stage: str, progress: float)
+            progress_callback: 進捗コールバック (details: ProgressDetails, progress: float)
+            clip_save_callback: クリップ保存コールバック (video_id: str, clip_path: Path)
+                               VLM分析後、クリップを削除する前に呼ばれる
 
         Returns:
             SearchResult: 抽出されたセグメントのリスト
@@ -82,25 +94,47 @@ class ExtractSegmentsUseCase:
                     f"max_final={self.config.max_final_results}, "
                     f"vlm_enabled={self.config.enable_vlm_refinement}")
 
-        def update_progress(stage: str, progress: float) -> None:
+        def update_progress(
+            phase: str,
+            step: str,
+            progress: float,
+            details: dict | None = None,
+        ) -> None:
             if progress_callback:
-                progress_callback(stage, progress)
+                progress_callback(
+                    ProgressDetails(phase=phase, step=step, details=details),
+                    progress,
+                )
 
         # Phase 1: 複数クエリ生成
         logger.info("-" * 40)
         logger.info("[Phase 1] 複数クエリ生成開始")
-        update_progress("クエリを最適化中...", 0.05)
+        update_progress(
+            phase="クエリ最適化",
+            step="LLMでクエリを最適化中...",
+            progress=0.05,
+            details={"user_query": user_query},
+        )
         query_variants = self.llm_client.generate_search_queries(user_query)
         logger.info(f"  生成されたクエリ:")
         logger.info(f"    original: {query_variants.original!r}")
         logger.info(f"    optimized: {query_variants.optimized!r}")
         logger.info(f"    simplified: {query_variants.simplified!r}")
+        update_progress(
+            phase="クエリ最適化",
+            step="クエリ生成完了",
+            progress=0.08,
+            details={
+                "original": query_variants.original,
+                "optimized": query_variants.optimized,
+                "simplified": query_variants.simplified,
+            },
+        )
 
         # Phase 2: マルチ戦略YouTube検索（3クエリ × 3戦略 = 最大9回検索）
         logger.info("-" * 40)
         logger.info("[Phase 2] マルチ戦略YouTube検索開始")
         logger.info(f"  動画長フィルタ: {self.config.duration_min_sec}s - {self.config.duration_max_sec}s")
-        update_progress("YouTube動画を検索中...", 0.1)
 
         # 3種類のクエリをリストにまとめる
         search_queries = [
@@ -111,6 +145,16 @@ class ExtractSegmentsUseCase:
         # 重複クエリを除去
         unique_queries = list(dict.fromkeys(search_queries))
         logger.info(f"  検索クエリ数: {len(unique_queries)}（重複除去後）")
+
+        update_progress(
+            phase="YouTube検索",
+            step="YouTube Data APIで動画を検索中...",
+            progress=0.1,
+            details={
+                "query_count": len(unique_queries),
+                "queries": unique_queries,
+            },
+        )
 
         search_result = self.youtube_searcher.search_multi_strategy(
             queries=unique_queries,
@@ -125,9 +169,29 @@ class ExtractSegmentsUseCase:
         for i, video in enumerate(videos[:5]):  # 最初の5件だけログ
             logger.debug(f"    [{i+1}] {video.title[:50]}... (id={video.video_id}, {video.duration_sec}s)")
 
+        update_progress(
+            phase="YouTube検索",
+            step=f"{len(videos)}件の動画が見つかりました",
+            progress=0.2,
+            details={
+                "video_count": len(videos),
+                "videos": [
+                    {"title": v.title, "channel": v.channel_name, "duration_sec": v.duration_sec}
+                    for v in videos[:10]  # 上位10件のみ
+                ],
+                "search_stats": search_result.search_stats,
+            },
+        )
+
         if not videos:
             logger.warning("[RESULT] 動画が見つかりませんでした")
             logger.info("=" * 60)
+            update_progress(
+                phase="YouTube検索",
+                step="動画が見つかりませんでした",
+                progress=1.0,
+                details={"video_count": 0},
+            )
             return SearchResult(
                 query=user_query,
                 segments=[],
@@ -138,12 +202,27 @@ class ExtractSegmentsUseCase:
         logger.info("-" * 40)
         logger.info("[Phase 3] 字幕取得＆範囲特定開始")
         logger.info(f"  処理対象: {len(videos)}件の動画")
-        update_progress("字幕を分析中...", 0.4)
-        candidates = self._process_videos_parallel(videos, user_query)
+        update_progress(
+            phase="字幕分析",
+            step=f"{len(videos)}件の動画の字幕を取得・分析中...",
+            progress=0.25,
+            details={"total_videos": len(videos)},
+        )
+        candidates, subtitle_stats = self._process_videos_parallel(videos, user_query, update_progress)
         logger.info(f"  候補セグメント: {len(candidates)}件")
         for i, (video, tr, conf, summary) in enumerate(candidates[:5]):
             logger.debug(f"    [{i+1}] {video.title[:30]}... "
                         f"time={tr.start_sec:.1f}-{tr.end_sec:.1f}s, conf={conf:.2f}")
+        
+        update_progress(
+            phase="字幕分析",
+            step=f"字幕分析完了: {len(candidates)}件の候補セグメント",
+            progress=0.5,
+            details={
+                "candidate_count": len(candidates),
+                "stats": subtitle_stats,
+            },
+        )
 
         # 上位N件に絞り込み
         candidates = sorted(
@@ -156,20 +235,52 @@ class ExtractSegmentsUseCase:
         if not candidates:
             logger.warning("[RESULT] 関連するセグメントが見つかりませんでした")
             logger.info("=" * 60)
+            update_progress(
+                phase="字幕分析",
+                step="関連するセグメントが見つかりませんでした",
+                progress=1.0,
+                details={"candidate_count": 0},
+            )
             return SearchResult(
                 query=user_query,
                 segments=[],
                 processing_time_sec=time.time() - start_time,
             )
 
+        update_progress(
+            phase="字幕分析",
+            step=f"上位{len(candidates)}件に絞り込み完了",
+            progress=0.55,
+            details={
+                "selected_count": len(candidates),
+                "selected_videos": [
+                    {"title": v.title, "confidence": conf}
+                    for v, _, conf, _ in candidates
+                ],
+            },
+        )
+
         # Phase 4: 精密時刻特定（VLM使用）
         if self.config.enable_vlm_refinement and candidates:
             logger.info("-" * 40)
             logger.info("[Phase 4] VLM精密分析開始")
-            update_progress("動画を精密分析中...", 0.6)
-            segments = self._refine_with_vlm(candidates, user_query, update_progress)
+            update_progress(
+                phase="VLM精密分析",
+                step=f"{len(candidates)}件の動画を精密分析開始...",
+                progress=0.6,
+                details={"total_videos": len(candidates)},
+            )
+            segments = self._refine_with_vlm(
+                candidates, user_query, update_progress, clip_save_callback
+            )
         else:
             logger.info("[Phase 4] VLM精密分析スキップ（設定またはcandidatesなし）")
+            update_progress(
+                phase="VLM精密分析",
+                step="VLM精密分析をスキップ（無効設定）",
+                progress=0.9,
+                details={"skipped": True},
+            )
             # VLMスキップ時は字幕ベースの結果をそのまま使用
             segments = [
                 VideoSegment(
@@ -182,7 +293,15 @@ class ExtractSegmentsUseCase:
             ]
 
         processing_time = time.time() - start_time
-        update_progress("完了", 1.0)
+        update_progress(
+            phase="完了",
+            step=f"処理完了: {len(segments)}件のセグメント",
+            progress=1.0,
+            details={
+                "segment_count": len(segments),
+                "processing_time_sec": round(processing_time, 2),
+            },
+        )
 
         logger.info("-" * 40)
         logger.info(f"[RESULT] 処理完了")
@@ -204,20 +323,23 @@ class ExtractSegmentsUseCase:
         self,
         videos: list[Video],
         user_query: str,
-    ) -> list[tuple[Video, TimeRange, float, str]]:
+        update_progress: Callable[[str, str, float, dict | None], None],
+    ) -> tuple[list[tuple[Video, TimeRange, float, str]], dict]:
         """
         複数動画を並列処理して候補を抽出
 
         Returns:
-            [(Video, TimeRange, confidence, summary), ...]
+            ([(Video, TimeRange, confidence, summary), ...], stats_dict)
         """
         candidates = []
         success_count = 0
         error_count = 0
         no_subtitle_count = 0
         no_match_count = 0
+        processed_count = 0
+        total = len(videos)
 
-        logger.debug(f"  並列処理開始: {len(videos)}件の動画")
+        logger.debug(f"  並列処理開始: {total}件の動画")
 
         # ThreadPoolExecutorで並列処理
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -234,6 +356,7 @@ class ExtractSegmentsUseCase:
                 video = futures[future]
                 try:
                     result = future.result(timeout=30)
+                    processed_count += 1
                     if result:
                         candidates.extend(result)
                         success_count += 1
@@ -242,6 +365,7 @@ class ExtractSegmentsUseCase:
                         no_match_count += 1
                         logger.debug(f"    - {video.video_id}: 該当セグメントなし")
                 except Exception as e:
+                    processed_count += 1
                     error_count += 1
                     error_msg = str(e)
                     if "subtitle" in error_msg.lower() or "transcript" in error_msg.lower():
@@ -251,11 +375,35 @@ class ExtractSegmentsUseCase:
                         logger.warning(f"    ✗ {video.video_id}: エラー - {e}")
                     continue
 
+                # 進捗更新（10件ごと、または最後）
+                if processed_count % 10 == 0 or processed_count == total:
+                    progress = 0.25 + (0.2 * processed_count / total)
+                    update_progress(
+                        "字幕分析",
+                        f"字幕を分析中... ({processed_count}/{total})",
+                        progress,
+                        {
+                            "processed": processed_count,
+                            "total": total,
+                            "success": success_count,
+                            "no_match": no_match_count,
+                            "no_subtitle": no_subtitle_count,
+                            "errors": error_count,
+                        },
+                    )
+
+        stats = {
+            "success": success_count,
+            "no_match": no_match_count,
+            "no_subtitle": no_subtitle_count,
+            "errors": error_count,
+        }
+
         logger.info(f"  並列処理完了: 成功={success_count}, "
                    f"該当なし={no_match_count}, 字幕なし={no_subtitle_count}, "
                    f"エラー={error_count}")
 
-        return candidates
+        return candidates, stats
 
     def _process_single_video(
         self,
@@ -303,10 +451,17 @@ class ExtractSegmentsUseCase:
         self,
         candidates: list[tuple[Video, TimeRange, float, str]],
         user_query: str,
-        update_progress: Callable[[str, float], None],
+        update_progress: Callable[[str, str, float, dict | None], None],
+        clip_save_callback: Callable[[str, Path], None] | None = None,
     ) -> list[VideoSegment]:
         """
         VLMで精密な時刻を特定
+
+        Args:
+            candidates: 候補リスト
+            user_query: ユーザークエリ
+            update_progress: 進捗更新コールバック
+            clip_save_callback: クリップ保存コールバック（削除前に呼ばれる）
         """
         segments = []
         total = len(candidates)
@@ -318,11 +473,20 @@ class ExtractSegmentsUseCase:
             logger.debug(f"    推定範囲: {estimated_range.start_sec:.1f}s - {estimated_range.end_sec:.1f}s")
             
             try:
-                # 進捗更新
-                progress = 0.6 + (0.3 * (i / total))
+                # 進捗更新: ダウンロード開始
+                progress = 0.6 + (0.35 * (i / total))
                 update_progress(
-                    f"動画を精密分析中... ({i + 1}/{total})",
+                    "VLM精密分析",
+                    f"動画クリップをダウンロード中... ({i + 1}/{total})",
                     progress,
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "video_title": video.title,
+                        "video_id": video.video_id,
+                        "status": "downloading",
+                        "estimated_range": f"{estimated_range.start_sec:.0f}s - {estimated_range.end_sec:.0f}s",
+                    },
                 )
 
                 # バッファ追加
@@ -346,6 +510,21 @@ class ExtractSegmentsUseCase:
                 # ファイルサイズを確認
                 clip_size = Path(clip_path).stat().st_size / (1024 * 1024)  # MB
                 logger.debug(f"    クリップ抽出完了: {clip_size:.2f} MB")
+
+                # 進捗更新: VLM分析開始
+                update_progress(
+                    "VLM精密分析",
+                    f"Geminiで動画を分析中... ({i + 1}/{total})",
+                    progress + 0.15 / total,
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "video_title": video.title,
+                        "video_id": video.video_id,
+                        "status": "analyzing",
+                        "clip_size_mb": round(clip_size, 2),
+                    },
+                )
 
                 # VLMで精密分析
                 logger.debug(f"    VLM分析開始")
@@ -373,6 +552,21 @@ class ExtractSegmentsUseCase:
                     )
                 )
 
+                # 進捗更新: 完了
+                update_progress(
+                    "VLM精密分析",
+                    f"分析完了 ({i + 1}/{total}): {video.title[:30]}...",
+                    progress + 0.3 / total,
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "video_title": video.title,
+                        "status": "completed",
+                        "confidence": round(confidence, 2),
+                        "time_range": f"{absolute_range.start_sec:.0f}s - {absolute_range.end_sec:.0f}s",
+                    },
+                )
+
             except Exception as e:
                 logger.error(f"    ✗ VLM分析失敗: {video.video_id} - {e}")
                 # VLM失敗時は元の推定範囲を使用
@@ -385,7 +579,28 @@ class ExtractSegmentsUseCase:
                     )
                 )
 
+                # 進捗更新: エラー
+                update_progress(
+                    "VLM精密分析",
+                    f"分析失敗 ({i + 1}/{total}): {video.title[:30]}...",
+                    progress + 0.3 / total,
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "video_title": video.title,
+                        "status": "error",
+                        "error": str(e)[:100],
+                    },
+                )
+
             finally:
+                # クリップ保存コールバックがあれば呼び出す
+                if clip_path and clip_save_callback:
+                    try:
+                        clip_save_callback(video.video_id, Path(clip_path))
+                    except Exception as e:
+                        logger.warning(f"    クリップ保存コールバック失敗: {e}")
+
                 # 一時ファイル削除
                 if clip_path:
                     try:
