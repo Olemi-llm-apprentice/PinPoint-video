@@ -84,3 +84,55 @@ README多言語対応
 - メインREADMEは英語で記述し、日本語・中国語版は別ファイルとして参照する構成
 
 ---
+
+[2026-01-10 13:30:00]
+
+## 作業内容
+
+YouTube検索の精度向上のためマルチクエリ・マルチ戦略検索を実装
+
+### 背景・問題
+
+- 「Claude Code 2.1.2の主な変更点」で検索しても結果が0件になる問題を調査
+- YouTube Data APIの`relevance`順では新しい動画が出にくいことが判明
+- LLMによるクエリ変換で日本語→英語にすると関連動画がヒットしなくなることが判明
+
+### 実施した作業
+
+1. **LLMクライアント拡張** (`gemini_llm_client.py`)
+   - `generate_search_queries()` メソッド追加
+   - 3種類のクエリを生成: original（そのまま）, optimized（英語最適化）, simplified（キーワード抽出）
+
+2. **YouTubeクライアント拡張** (`youtube_data_api.py`)
+   - `search_multi_strategy()` メソッド追加
+   - 3パターンの検索戦略: relevance, date, relevance_recent（過去1ヶ月）
+   - video_idによる重複排除を内蔵
+
+3. **インターフェース更新**
+   - `SearchQueryVariants` データクラス追加 (`llm_client.py`)
+   - `MultiSearchResult` データクラス追加 (`youtube_searcher.py`)
+
+4. **ユースケース更新** (`extract_segments.py`)
+   - Phase 1: 複数クエリ生成（旧: 単一クエリ変換）
+   - Phase 2: マルチ戦略検索（旧: 単一検索）
+   - 重複排除後に字幕分析へ進む新フロー
+
+### 変更したファイル
+
+- `src/application/interfaces/llm_client.py` - SearchQueryVariants追加、generate_search_queries定義
+- `src/application/interfaces/youtube_searcher.py` - MultiSearchResult追加、search_multi_strategy定義
+- `src/infrastructure/gemini_llm_client.py` - generate_search_queries実装
+- `src/infrastructure/youtube_data_api.py` - search_multi_strategy実装
+- `src/application/usecases/extract_segments.py` - 新フロー統合
+
+### テスト結果
+
+- 改善前: 2026年1月の動画 0件
+- 改善後: 2026年1月の動画 3件（relevance_recent戦略で取得）
+
+### 備考
+
+- 全ての処理でログ出力・LangSmithトレーシング対応済み
+- 3クエリ × 3戦略 = 最大9回の検索を実行し、重複排除して母数を増やす設計
+
+---

@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     FFMPEG_PATH: str = "ffmpeg"
     YTDLP_PATH: str = "yt-dlp"
 
+    # Logging & Observability
+    LOG_LEVEL: str = "INFO"
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_API_KEY: str | None = None
+    LANGSMITH_PROJECT: str = "pinpoint-video"
+
     def get_model(self, purpose: str) -> str:
         """用途に応じたモデル名を取得"""
         model_map = {

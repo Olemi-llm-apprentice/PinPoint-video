@@ -1,5 +1,8 @@
 """Streamlit アプリケーションエントリーポイント"""
 
+import logging
+import os
+
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -10,9 +13,17 @@ from src.application.usecases.extract_segments import (
 )
 from src.infrastructure.gemini_llm_client import GeminiLLMClient
 from src.infrastructure.gemini_vlm_client import GeminiVLMClient
+from src.infrastructure.logging_config import get_logger, is_langsmith_enabled, setup_logging
 from src.infrastructure.youtube_data_api import YouTubeDataAPIClient
 from src.infrastructure.youtube_transcript import YouTubeTranscriptClient
 from src.infrastructure.ytdlp_extractor import YtdlpVideoExtractor
+
+# ロギング初期化
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+setup_logging(level=log_level)
+
+logger = get_logger(__name__)
 
 
 def init_usecase() -> ExtractSegmentsUseCase:
@@ -83,6 +94,13 @@ def main() -> None:
 
     st.title("🎯 PinPoint.video")
     st.markdown("YouTube動画からピンポイントで情報を抽出")
+    
+    # LangSmith有効状態をサイドバーに表示
+    if is_langsmith_enabled():
+        project = os.getenv("LANGSMITH_PROJECT", "default")
+        st.sidebar.success(f"🔍 LangSmith: 有効 (project: {project})")
+    else:
+        st.sidebar.info("🔍 LangSmith: 無効")
 
     # サイドバー設定
     with st.sidebar:
@@ -102,6 +120,11 @@ def main() -> None:
         submitted = st.form_submit_button("🔎 検索", use_container_width=True)
 
     if submitted and query:
+        logger.info("=" * 70)
+        logger.info(f"[APP] 新規検索リクエスト")
+        logger.info(f"  クエリ: {query!r}")
+        logger.info(f"  VLM精密分析: {'有効' if enable_vlm else '無効'}")
+        
         try:
             usecase = init_usecase()
             # VLM設定を上書き
@@ -122,6 +145,8 @@ def main() -> None:
             status_text.text(
                 f"✅ 完了 (処理時間: {result.processing_time_sec:.1f}秒)"
             )
+            
+            logger.info(f"[APP] 検索完了: {len(result.segments)}件のセグメント")
 
             # 結果表示
             if not result.segments:
@@ -171,6 +196,7 @@ def main() -> None:
                             st.code(embed_url, language=None)
 
         except Exception as e:
+            logger.error(f"[APP] エラー発生: {e}", exc_info=True)
             st.error(f"エラーが発生しました: {e}")
             st.exception(e)
 

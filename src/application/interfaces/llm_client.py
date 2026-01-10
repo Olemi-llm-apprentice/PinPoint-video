@@ -1,8 +1,18 @@
 """LLMクライアントインターフェース"""
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from src.domain.entities import SubtitleChunk, TimeRange
+
+
+@dataclass
+class SearchQueryVariants:
+    """検索クエリのバリエーション"""
+
+    original: str  # ユーザー入力そのまま
+    optimized: str  # LLMで最適化（現行ロジック）
+    simplified: str  # シンプルなキーワードに分割
 
 
 class LLMClient(Protocol):
@@ -10,13 +20,25 @@ class LLMClient(Protocol):
 
     def convert_to_search_query(self, user_query: str) -> str:
         """
-        ユーザークエリをYouTube検索クエリに変換
+        ユーザークエリをYouTube検索クエリに変換（後方互換性のため残す）
 
         Args:
             user_query: ユーザーの入力クエリ
 
         Returns:
             YouTube検索に最適化されたクエリ
+        """
+        ...
+
+    def generate_search_queries(self, user_query: str) -> SearchQueryVariants:
+        """
+        ユーザークエリから複数の検索クエリバリエーションを生成
+
+        Args:
+            user_query: ユーザーの入力クエリ
+
+        Returns:
+            SearchQueryVariants: 3種類のクエリバリエーション
         """
         ...
 

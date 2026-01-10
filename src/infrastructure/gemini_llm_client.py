@@ -4,8 +4,12 @@ import json
 
 from google import genai
 
+from src.application.interfaces.llm_client import SearchQueryVariants
 from src.domain.entities import SubtitleChunk, TimeRange
 from src.domain.exceptions import LLMError
+from src.infrastructure.logging_config import get_logger, trace_llm
+
+logger = get_logger(__name__)
 
 
 class GeminiLLMClient:
@@ -38,6 +42,7 @@ class GeminiLLMClient:
         self.query_convert_model = query_convert_model
         self.subtitle_analysis_model = subtitle_analysis_model
 
+    @trace_llm(name="convert_to_search_query", metadata={"purpose": "query_optimization"})
     def convert_to_search_query(self, user_query: str) -> str:
         """
         ユーザークエリをYouTube検索クエリに変換
@@ -51,6 +56,10 @@ class GeminiLLMClient:
         Raises:
             LLMError: API呼び出しエラー
         """
+        logger.info(f"[LLM] クエリ変換開始")
+        logger.debug(f"  入力: {user_query!r}")
+        logger.debug(f"  モデル: {self.query_convert_model}")
+        
         prompt = f"""あなたはYouTube検索クエリの最適化専門家です。
 
 ユーザーの質問を、YouTube検索で最も関連性の高い結果が得られる
@@ -66,14 +75,101 @@ class GeminiLLMClient:
 検索クエリのみを出力してください（説明不要）:"""
 
         try:
+            logger.debug(f"  プロンプト長: {len(prompt)} chars")
             response = self.client.models.generate_content(
                 model=self.query_convert_model,
                 contents=prompt,
             )
-            return response.text.strip()
+            result = response.text.strip()
+            logger.info(f"[LLM] クエリ変換完了: {result!r}")
+            return result
         except Exception as e:
+            logger.error(f"[LLM] クエリ変換失敗: {e}")
             raise LLMError(f"Failed to convert query: {e}") from e
 
+    @trace_llm(name="generate_search_queries", metadata={"purpose": "multi_query_generation"})
+    def generate_search_queries(self, user_query: str) -> SearchQueryVariants:
+        """
+        ユーザークエリから複数の検索クエリバリエーションを生成
+
+        3種類のクエリを生成:
+        1. original: ユーザー入力そのまま
+        2. optimized: LLMで最適化（英語キーワード追加など）
+        3. simplified: シンプルなキーワードに分割
+
+        Args:
+            user_query: ユーザーの入力クエリ
+
+        Returns:
+            SearchQueryVariants: 3種類のクエリバリエーション
+        """
+        logger.info(f"[LLM] 複数クエリ生成開始")
+        logger.debug(f"  入力: {user_query!r}")
+
+        prompt = f"""あなたはYouTube検索クエリの最適化専門家です。
+
+ユーザーの質問から、YouTube検索用のクエリを2種類生成してください。
+
+ユーザーの質問: {user_query}
+
+以下のJSON形式で回答してください:
+{{
+  "optimized": "<英語キーワードを含む最適化クエリ（5-7語）>",
+  "simplified": "<核となるキーワードのみ（2-4語、固有名詞・技術用語中心）>"
+}}
+
+ルール:
+- optimized: 英語の修飾語（tutorial, explained, how to等）を適宜追加
+- simplified: 余計な言葉を省いて核となるキーワードのみ抽出
+  例: "Claude Code 2.1.2の主な変更点" → "Claude Code 2.1.2"
+  例: "Pythonでファイルを読み込む方法" → "Python ファイル 読み込み"
+
+JSONのみを出力してください:"""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.query_convert_model,
+                contents=prompt,
+            )
+
+            json_str = response.text.strip()
+            logger.debug(f"  LLM生出力: {json_str}")
+
+            # JSON部分を抽出
+            if json_str.startswith("```"):
+                json_str = json_str.split("```")[1]
+                if json_str.startswith("json"):
+                    json_str = json_str[4:]
+            json_str = json_str.strip()
+
+            data = json.loads(json_str)
+
+            result = SearchQueryVariants(
+                original=user_query,
+                optimized=data.get("optimized", user_query),
+                simplified=data.get("simplified", user_query),
+            )
+
+            logger.info(f"[LLM] 複数クエリ生成完了:")
+            logger.info(f"  original: {result.original!r}")
+            logger.info(f"  optimized: {result.optimized!r}")
+            logger.info(f"  simplified: {result.simplified!r}")
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[LLM] JSONパースエラー、フォールバック使用: {e}")
+            # フォールバック: 全て元のクエリを使用
+            return SearchQueryVariants(
+                original=user_query,
+                optimized=user_query,
+                simplified=user_query,
+            )
+        except Exception as e:
+            logger.error(f"[LLM] クエリ生成失敗: {e}")
+            raise LLMError(f"Failed to generate search queries: {e}") from e
+
+    @trace_llm(name="find_relevant_ranges", metadata={"purpose": "subtitle_analysis"})
     def find_relevant_ranges(
         self,
         subtitle_text: str,
@@ -94,6 +190,11 @@ class GeminiLLMClient:
         Raises:
             LLMError: API呼び出しエラー
         """
+        logger.debug(f"[LLM] 関連範囲特定開始")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  字幕チャンク数: {len(subtitle_chunks)}")
+        logger.debug(f"  モデル: {self.subtitle_analysis_model}")
+        
         # 字幕チャンクを時間付きで整形
         formatted_chunks = "\n".join(
             [
@@ -131,6 +232,8 @@ class GeminiLLMClient:
 
 JSONのみを出力してください:"""
 
+        logger.debug(f"  プロンプト長: {len(prompt)} chars")
+
         try:
             response = self.client.models.generate_content(
                 model=self.subtitle_analysis_model,
@@ -139,6 +242,8 @@ JSONのみを出力してください:"""
 
             # JSON部分を抽出してパース
             json_str = response.text.strip()
+            logger.debug(f"  LLM生出力: {json_str[:200]}..." if len(json_str) > 200 else f"  LLM生出力: {json_str}")
+            
             if json_str.startswith("```"):
                 json_str = json_str.split("```")[1]
                 if json_str.startswith("json"):
@@ -157,11 +262,19 @@ JSONのみを出力してください:"""
                 summary = seg["summary"]
                 results.append((time_range, confidence, summary))
 
+            logger.debug(f"[LLM] 関連範囲特定完了: {len(results)}件")
+            for i, (tr, conf, summ) in enumerate(results):
+                logger.debug(f"    [{i+1}] {tr.start_sec:.1f}s-{tr.end_sec:.1f}s, conf={conf:.2f}, summary={summ[:30]}...")
+            
             return results
 
         except json.JSONDecodeError as e:
+            logger.error(f"[LLM] JSONパースエラー: {e}")
+            logger.error(f"  生出力: {json_str[:500] if json_str else 'N/A'}")
             raise LLMError(f"Failed to parse LLM response as JSON: {e}") from e
         except (KeyError, ValueError) as e:
+            logger.error(f"[LLM] レスポンス形式エラー: {e}")
             raise LLMError(f"Invalid LLM response format: {e}") from e
         except Exception as e:
+            logger.error(f"[LLM] APIエラー: {e}")
             raise LLMError(f"LLM API error: {e}") from e

@@ -8,6 +8,9 @@ from google.genai import types
 
 from src.domain.entities import TimeRange
 from src.domain.exceptions import VLMError
+from src.infrastructure.logging_config import get_logger, trace_llm
+
+logger = get_logger(__name__)
 
 
 class GeminiVLMClient:
@@ -37,6 +40,7 @@ class GeminiVLMClient:
 
         self.video_analysis_model = video_analysis_model
 
+    @trace_llm(name="analyze_video_clip", metadata={"purpose": "video_analysis"})
     def analyze_video_clip(
         self,
         video_path: str,
@@ -60,10 +64,21 @@ class GeminiVLMClient:
         - gemini-2.5-flash は動画分析に対応
         - 部分ダウンロードしたクリップは通常5分以下なので余裕
         """
+        logger.info(f"[VLM] 動画分析開始")
+        logger.debug(f"  動画パス: {video_path}")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  モデル: {self.video_analysis_model}")
+        
+        # ファイルサイズをログ
+        file_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
+        logger.debug(f"  ファイルサイズ: {file_size_mb:.2f} MB")
+        
         video_file = None
         try:
             # 動画ファイルをアップロード
+            logger.debug(f"  ファイルアップロード開始...")
             video_file = self.client.files.upload(file=video_path)
+            logger.debug(f"  ファイルアップロード完了: {video_file.name}")
 
             prompt = f"""あなたは動画内容分析の専門家です。
 
@@ -87,12 +102,16 @@ class GeminiVLMClient:
 
 JSONのみを出力してください:"""
 
+            logger.debug(f"  VLM API呼び出し開始...")
             response = self.client.models.generate_content(
                 model=self.video_analysis_model,
                 contents=[video_file, prompt],
             )
+            logger.debug(f"  VLM API呼び出し完了")
 
             json_str = response.text.strip()
+            logger.debug(f"  VLM生出力: {json_str[:200]}..." if len(json_str) > 200 else f"  VLM生出力: {json_str}")
+            
             if json_str.startswith("```"):
                 json_str = json_str.split("```")[1]
                 if json_str.startswith("json"):
@@ -108,13 +127,20 @@ JSONのみを出力してください:"""
             confidence = float(data["confidence"])
             summary = data["summary"]
 
+            logger.info(f"[VLM] 動画分析完了: {time_range.start_sec:.1f}s-{time_range.end_sec:.1f}s, "
+                       f"conf={confidence:.2f}")
+            logger.debug(f"  サマリー: {summary}")
+
             return time_range, confidence, summary
 
         except json.JSONDecodeError as e:
+            logger.error(f"[VLM] JSONパースエラー: {e}")
             raise VLMError(f"Failed to parse VLM response as JSON: {e}") from e
         except (KeyError, ValueError) as e:
+            logger.error(f"[VLM] レスポンス形式エラー: {e}")
             raise VLMError(f"Invalid VLM response format: {e}") from e
         except Exception as e:
+            logger.error(f"[VLM] APIエラー: {e}")
             raise VLMError(f"VLM API error: {e}") from e
 
         finally:
@@ -122,8 +148,9 @@ JSONのみを出力してください:"""
             if video_file:
                 try:
                     self.client.files.delete(name=video_file.name)
-                except Exception:
-                    pass
+                    logger.debug(f"  アップロードファイル削除完了")
+                except Exception as del_e:
+                    logger.warning(f"  アップロードファイル削除失敗: {del_e}")
 
     def analyze_video_clip_with_custom_fps(
         self,
