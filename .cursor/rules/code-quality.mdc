@@ -1,0 +1,112 @@
+---
+description: Code quality principles based on "The 11 Aspects of Good Code"
+globs:
+alwaysApply: true
+---
+
+# Code Quality Principles
+
+This document defines the 11 aspects of good code that must guide all development decisions.
+
+## External Properties
+
+### 1. Done Code
+- Code must fulfill its intended purpose and deliver value
+- Non-functional requirements (performance, reliability) are equally important
+- "Done" is not an excuse for technical debt that blocks future progress
+- A working feature that takes years to modify is not truly done
+
+### 2. Understandable Code
+- Write code that is understandable to those who need to read it, at the time they need to read it
+- Do not hide in your comfort zone of skill (refusing to learn better approaches)
+- Do not hide in your comfort zone of empathy (assuming everyone knows what you know)
+- Consider your actual audience when choosing abstraction levels
+
+### 3. Evolvable Code
+- Software exists in a changing world; design for change
+- Create code that is easy to extend and difficult to break
+- Avoid rigid code that resists all modification
+- Avoid brittle code that breaks with minor changes
+- Do not over-engineer for specific futures, but acknowledge that change will occur
+
+## Internal Properties
+
+### 4. Modular Understanding
+- Every piece of code must have a clear, singular purpose
+- Each line should be understandable in isolation
+- Avoid "action at a distance" where distant code sections are mysteriously coupled
+- Assumptions and guarantees of each component should click together like Legos
+- Code should work by design, not by coincidence
+
+### 5. Recoverable Intent
+- Make it easy to recover the original programmer's intent
+- Naming decisions should conjure the true purpose while warding off misconceptions
+- Functions should carve behavior into meaningful chunks
+- Modules should create new abstractions that empower the reader
+- Write in the language of the domain, not just the language of the machine
+
+### 6. Single Source of Truth
+- Express design intent in a single place
+- A single conceptual change should require a single code change
+- Avoid scattering related logic across thousands of locations
+- Abstract common patterns so changes propagate automatically
+
+### 7. Robustness
+- Every line is an opportunity for mistakes; minimize that opportunity
+- APIs should have guardrails preventing misuse
+- Invalid states should be unrepresentable
+- "If it compiles, it probably works" is the goal
+- Code so simple there are obviously no bugs, not so complex there are no obvious bugs
+
+### 8. Information Hiding (Secrets)
+- Hide implementation details that may change
+- Subsystems should not depend on internal details of other subsystems
+- Avoid sharing details that create invisible coupling
+- The master's virtue is knowing only what is necessary
+
+### 9. Isolated Assumptions
+- Minimize the spread of knowledge throughout the codebase
+- Pass data as sealed packages when possible; avoid unnecessary inspection
+- Every function that "knows" about a type is a barrier to changing that type
+- Reduce the footprint of assumptions to enable future changes
+
+### 10. Openness
+- Design to be agnostic to set sizes when dealing with categories or options
+- Avoid hardcoding assumptions about the number of variants
+- When a variant is added or removed, changes should be localized
+- The open program accepts new things gracefully
+
+### 11. Full Wisdom Application
+- Continuously seek deeper understanding beyond surface-level rules
+- When intuition says code could be simpler, investigate why
+- When debugging is hard, search for how it could have been prevented
+- These principles are interconnected; master them as a unified whole
+
+## Practical Guidelines
+
+When writing or reviewing code, ask:
+1. Does this code fulfill its purpose completely?
+2. Can another developer understand this without my explanation?
+3. How hard will it be to change this in 6 months?
+4. Can each function be understood without reading others?
+5. Is the original intent obvious from the code itself?
+6. If I need to change this behavior, how many files must I touch?
+7. How hard is it to use this API incorrectly?
+8. What internal details am I exposing that I shouldn't?
+9. How many places "know" about this implementation detail?
+10. If I add a new variant, how many places need changes?
+11. Am I applying everything I know, or just following rules mechanically?
+
+## Anti-Patterns to Avoid
+
+- Claiming "it works" as justification for poor design
+- Writing code only you can understand
+- Designing as if no changes will ever occur
+- Creating functions that require reading the entire codebase to verify
+- Naming that requires guessing or tribal knowledge
+- Copy-pasting logic instead of abstracting it
+- APIs that allow silent corruption
+- Sharing implementation details across module boundaries
+- Spreading type knowledge throughout the codebase
+- Hardcoding assumptions about categories or options
+- Stopping at surface-level understanding of these principles

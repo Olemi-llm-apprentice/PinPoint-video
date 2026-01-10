@@ -1,0 +1,46 @@
+[project]
+name = "pinpoint-video"
+version = "0.1.0"
+description = "YouTube動画からピンポイントで情報を抽出するAIツール"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Web Framework
+    "streamlit>=1.30.0",
+    
+    # YouTube
+    "google-api-python-client>=2.100.0",
+    "youtube-transcript-api>=1.2.0",
+    "yt-dlp>=2024.12.0",
+    
+    # AI/ML - 新SDK
+    "google-genai>=1.0.0",
+    
+    # Settings
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    
+    # Utilities
+    "httpx>=0.25.0",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
