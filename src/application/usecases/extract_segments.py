@@ -414,7 +414,8 @@ class ExtractSegmentsUseCase:
             for future in futures:
                 video = futures[future]
                 try:
-                    result, subtitle_data = future.result(timeout=30)
+                    # YouTube URLフォールバック時は60秒以上かかる場合があるため、タイムアウトを延長
+                    result, subtitle_data = future.result(timeout=120)
                     processed_count += 1
                     
                     # 字幕データをコールバックで渡す
