@@ -2,7 +2,9 @@
 
 import logging
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from src.application.usecases.extract_segments import (
 from src.domain.entities import SearchResult, VideoSegment
 from src.infrastructure.gemini_llm_client import GeminiLLMClient
 from src.infrastructure.gemini_vlm_client import GeminiVLMClient
+from src.infrastructure.ytdlp_extractor import is_valid_mp4
 from src.infrastructure.logging_config import get_logger, is_langsmith_enabled, setup_logging
 from src.infrastructure.session_storage import SessionMetadata, SessionStorage
 from src.infrastructure.youtube_data_api import YouTubeDataAPIClient
@@ -76,6 +79,24 @@ def init_usecase() -> ExtractSegmentsUseCase:
             duration_min_sec=settings.DURATION_MIN_SEC,
             duration_max_sec=settings.DURATION_MAX_SEC,
         ),
+    )
+
+
+def init_llm_client() -> GeminiLLMClient:
+    """統合サマリー生成用のLLMクライアントを取得"""
+    settings = get_settings()
+    return GeminiLLMClient(
+        api_key=settings.GEMINI_API_KEY,
+        subtitle_analysis_model=settings.get_model("subtitle_analysis"),
+    )
+
+
+def init_video_extractor() -> YtdlpVideoExtractor:
+    """動画結合用のエクストラクターを取得"""
+    settings = get_settings()
+    return YtdlpVideoExtractor(
+        ffmpeg_path=settings.FFMPEG_PATH,
+        ytdlp_path=settings.YTDLP_PATH,
     )
 
 
@@ -216,28 +237,102 @@ def render_history_view(session_id: str) -> None:
         st.metric("処理時間", f"{result.processing_time_sec:.1f}秒")
 
     # タブで表示を切り替え
-    tab_results, tab_clips, tab_log, tab_markdown = st.tabs([
-        "📊 結果", "🎬 クリップ", "📝 ログ", "📄 Markdown"
+    tab_results, tab_queries, tab_videos, tab_subtitles, tab_clips, tab_log, tab_markdown = st.tabs([
+        "📊 結果", "🔍 クエリ", "🎥 動画一覧", "📝 字幕", "🎬 クリップ", "📋 ログ", "📄 Markdown"
     ])
 
     with tab_results:
+        # 統合サマリーを先に表示
+        integrated_summary = storage.get_integrated_summary(session_id)
+        if integrated_summary:
+            st.markdown("### 📝 統合サマリー")
+            st.markdown(integrated_summary)
+            st.markdown("---")
+        
+        # 個別セグメント
         render_result_segments(result.segments)
 
+    with tab_queries:
+        queries = storage.get_session_queries(session_id)
+        if queries:
+            st.markdown("### 生成された検索クエリ")
+            st.markdown(f"**オリジナル:** `{queries.get('original', '')}`")
+            st.markdown(f"**最適化:** `{queries.get('optimized', '')}`")
+            st.markdown(f"**簡略化:** `{queries.get('simplified', '')}`")
+        else:
+            st.caption("検索クエリデータがありません")
+
+    with tab_videos:
+        videos_data = storage.get_session_videos(session_id)
+        if videos_data:
+            st.markdown(f"### 検索でヒットした動画: {videos_data.get('count', 0)}件")
+            if videos_data.get("stats"):
+                st.json(videos_data["stats"])
+            
+            for i, v in enumerate(videos_data.get("videos", []), 1):
+                duration_min = v.get("duration_sec", 0) // 60
+                with st.expander(f"{i}. {v.get('title', '不明')[:50]}..."):
+                    st.markdown(f"- **チャンネル:** {v.get('channel_name', '不明')}")
+                    st.markdown(f"- **動画長:** {duration_min}分")
+                    st.markdown(f"- **公開日:** {v.get('published_at', '不明')[:10]}")
+                    st.markdown(f"- **動画ID:** `{v.get('video_id', '')}`")
+                    if v.get("thumbnail_url"):
+                        st.image(v["thumbnail_url"], width=200)
+        else:
+            st.caption("動画一覧データがありません")
+
+    with tab_subtitles:
+        subtitles = storage.get_session_subtitles(session_id)
+        if subtitles:
+            st.markdown(f"### 取得した字幕: {len(subtitles)}件")
+            for video_id, sub_data in subtitles.items():
+                with st.expander(f"📝 {video_id} ({sub_data.get('language', '不明')})"):
+                    st.markdown(f"- **言語:** {sub_data.get('language', '不明')} ({sub_data.get('language_code', '')})")
+                    st.markdown(f"- **自動生成:** {'はい' if sub_data.get('is_auto_generated') else 'いいえ'}")
+                    st.markdown(f"- **チャンク数:** {len(sub_data.get('chunks', []))}件")
+                    
+                    # 字幕テキストをダウンロード
+                    full_text = sub_data.get("full_text", "")
+                    if full_text:
+                        st.download_button(
+                            f"📥 字幕をダウンロード",
+                            data=full_text,
+                            file_name=f"subtitle_{video_id}.txt",
+                            mime="text/plain",
+                            key=f"subtitle_dl_{video_id}",
+                        )
+                        with st.expander("字幕テキスト（先頭500文字）"):
+                            st.text(full_text[:500] + "..." if len(full_text) > 500 else full_text)
+        else:
+            st.caption("字幕データがありません")
+
     with tab_clips:
+        # Final Clipを最初に表示
+        final_clip_path = storage.get_final_clip(session_id)
+        if final_clip_path:
+            st.markdown("### 🎬 結合動画 (Final Clip)")
+            try:
+                st.video(str(final_clip_path))
+                st.caption(f"📁 `{final_clip_path}`")
+            except Exception as e:
+                st.warning(f"Final Clipを再生できません: {e}")
+            st.markdown("---")
+        
+        # 個別クリップ
         clips = storage.get_session_clips(session_id)
         if clips:
-            st.info(f"保存されたクリップ: {len(clips)}件")
+            st.markdown(f"### 📹 個別クリップ ({len(clips)}件)")
             for clip_path in clips:
-                st.markdown(f"- `{clip_path.name}`")
-                # 動画再生（Streamlitのビデオプレーヤー）
-                try:
-                    st.video(str(clip_path))
-                except Exception:
-                    st.caption(f"再生できません: {clip_path}")
+                with st.expander(f"🎥 {clip_path.name}"):
+                    try:
+                        st.video(str(clip_path))
+                    except Exception:
+                        st.caption(f"再生できません: {clip_path}")
         else:
-            st.caption("保存されたクリップはありません")
-            if not metadata.vlm_enabled:
-                st.info("VLM精密分析が無効だったため、クリップは保存されていません")
+            if not final_clip_path:
+                st.caption("保存されたクリップはありません")
+                if not metadata.vlm_enabled:
+                    st.info("VLM精密分析が無効だったため、クリップは保存されていません")
 
     with tab_log:
         log_content = storage.get_session_log(session_id)
@@ -247,14 +342,12 @@ def render_history_view(session_id: str) -> None:
             st.caption("ログは保存されていません")
 
     with tab_markdown:
-        # result.mdを表示
         md_path = storage._get_session_dir(session_id) / "result.md"
         if md_path.exists():
             with open(md_path, encoding="utf-8") as f:
                 md_content = f.read()
             st.markdown(md_content)
             
-            # ダウンロードボタン
             st.download_button(
                 "📥 Markdownをダウンロード",
                 data=md_content,
@@ -288,8 +381,14 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
 
         # ログ収集用
         log_lines: list[str] = []
+        # 検索クエリ収集用
+        collected_queries: dict[str, str] = {}
+        # 検索動画収集用
+        collected_videos: list[dict] = []
+        collected_stats: dict = {}
 
         def progress_callback(details: ProgressDetails, progress: float) -> None:
+            nonlocal collected_queries, collected_videos, collected_stats
             phase_icons = {
                 "クエリ最適化": "🔄",
                 "YouTube検索": "🔍",
@@ -312,6 +411,11 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
 
                 if details.phase == "クエリ最適化":
                     if "optimized" in d:
+                        # クエリを収集
+                        collected_queries["original"] = d.get("original", "")
+                        collected_queries["optimized"] = d.get("optimized", "")
+                        collected_queries["simplified"] = d.get("simplified", "")
+                        
                         detail_lines.append("**生成されたクエリ:**")
                         detail_lines.append(f"- オリジナル: `{d.get('original', '')}`")
                         detail_lines.append(f"- 最適化: `{d.get('optimized', '')}`")
@@ -319,6 +423,12 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
 
                 elif details.phase == "YouTube検索":
                     if "video_count" in d:
+                        # 動画と統計を収集
+                        if "videos" in d:
+                            collected_videos.extend(d["videos"])
+                        if "search_stats" in d:
+                            collected_stats.update(d["search_stats"])
+                        
                         detail_lines.append(f"**検索結果:** {d['video_count']}件の動画")
                         if "videos" in d:
                             detail_lines.append("**発見した動画:**")
@@ -382,18 +492,34 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
             if detail_lines:
                 detail_placeholder.markdown("\n".join(detail_lines))
 
-        # クリップ保存用の一時的なセッションID（実行後に正式なIDを取得）
+        # クリップ保存用（一時ディレクトリにコピーしてから保存）
+        temp_clips_dir = Path(tempfile.mkdtemp(prefix="pinpoint_clips_"))
         saved_clips: list[tuple[str, Path]] = []
+        # 字幕保存用
+        saved_subtitles: list[tuple[str, dict]] = []
 
         def clip_save_callback(video_id: str, clip_path: Path) -> None:
+            # 即座に一時ディレクトリにコピー（元ファイルが削除される前に）
+            # 同じvideo_idから複数セグメントがある場合は連番を付ける
+            try:
+                segment_index = len(saved_clips)
+                temp_copy = temp_clips_dir / f"{video_id}_seg{segment_index}.mp4"
+                shutil.copy2(clip_path, temp_copy)
+                saved_clips.append((video_id, temp_copy))
+                logger.debug(f"[APP] クリップを一時保存: {temp_copy}")
+            except Exception as e:
+                logger.warning(f"[APP] クリップ一時保存失敗: {video_id} - {e}")
+
+        def subtitle_callback(video_id: str, subtitle_data: dict) -> None:
             # 後でセッションに保存するためにリストに追加
-            saved_clips.append((video_id, clip_path))
+            saved_subtitles.append((video_id, subtitle_data))
 
         # 実行
         result = usecase.execute(
             query,
             progress_callback=progress_callback,
             clip_save_callback=clip_save_callback if (enable_vlm and save_clips) else None,
+            subtitle_callback=subtitle_callback,
         )
 
         progress_bar.progress(1.0)
@@ -402,25 +528,159 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
         
         logger.info(f"[APP] 検索完了: {len(result.segments)}件のセグメント")
 
-        # セッションを保存
+        # 検索動画をVideoオブジェクトに変換（保存用）
+        from src.domain.entities import Video
+        search_videos = [
+            Video(
+                video_id=v.get("video_id", ""),
+                title=v.get("title", ""),
+                channel_name=v.get("channel", ""),
+                duration_sec=v.get("duration_sec", 0),
+                published_at=v.get("published_at", ""),
+                thumbnail_url=v.get("thumbnail_url", ""),
+            )
+            for v in collected_videos
+            if v.get("video_id")
+        ] if collected_videos else None
+
+        # セッションを保存（検索クエリ、動画、統計も含む）
         session_id = storage.save_session(
             result=result,
             vlm_enabled=enable_vlm,
             logs=log_lines,
+            search_queries=collected_queries if collected_queries else None,
+            search_videos=search_videos,
+            search_stats=collected_stats if collected_stats else None,
         )
 
-        # クリップを保存（VLMが有効だった場合）
-        for video_id, clip_path in saved_clips:
-            if clip_path.exists():
-                storage.save_clip(session_id, video_id, clip_path)
+        # クリップを保存（VLMが有効だった場合）- セグメント番号付きで保存
+        # 有効なMP4のみ保存
+        saved_clip_paths: list[Path] = []
+        for i, (video_id, clip_path) in enumerate(saved_clips):
+            if clip_path.exists() and is_valid_mp4(clip_path):
+                saved_path = storage.save_clip(session_id, video_id, clip_path, segment_index=i)
+                if saved_path:
+                    saved_clip_paths.append(saved_path)
+            elif clip_path.exists():
+                logger.warning(f"[APP] 無効なクリップをスキップ: {clip_path}")
+
+        # 一時クリップディレクトリをクリーンアップ
+        try:
+            shutil.rmtree(temp_clips_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # 字幕を保存
+        for video_id, subtitle_data in saved_subtitles:
+            storage.save_subtitle(session_id, video_id, subtitle_data)
 
         logger.info(f"[APP] セッション保存完了: {session_id}")
 
+        # === Phase 1: 即時表示 ===
         # 結果表示
         render_result_segments(result.segments)
 
         # 保存完了メッセージ
         st.info(f"💾 検索結果を保存しました (ID: {session_id[:20]}...)")
+
+        # === Phase 2: 統合サマリーとFinal Clip処理 ===
+        # 統合サマリー用プレースホルダー
+        st.markdown("---")
+        summary_container = st.container()
+        with summary_container:
+            summary_placeholder = st.empty()
+            summary_placeholder.info("📝 統合サマリーを生成中...")
+
+        # Final Clip用プレースホルダー
+        final_clip_container = st.container()
+        with final_clip_container:
+            final_clip_placeholder = st.empty()
+            if enable_vlm and save_clips and saved_clip_paths:
+                final_clip_placeholder.info("🎬 動画クリップを結合中...")
+
+        # 統合サマリー生成
+        integrated_summary = None
+        try:
+            if result.segments:
+                llm_client = init_llm_client()
+                segment_summaries = [
+                    {
+                        "video_title": seg.video.title,
+                        "summary": seg.summary,
+                        "time_range": f"{format_time(seg.time_range.start_sec)} - {format_time(seg.time_range.end_sec)}",
+                    }
+                    for seg in result.segments
+                ]
+                integrated_summary = llm_client.generate_integrated_summary(
+                    user_query=query,
+                    segment_summaries=segment_summaries,
+                )
+                storage.save_integrated_summary(session_id, integrated_summary)
+                summary_placeholder.success("📝 **統合サマリー**")
+                st.markdown(integrated_summary)
+                logger.info(f"[APP] 統合サマリー生成完了")
+            else:
+                summary_placeholder.warning("該当するセグメントが見つかりませんでした。")
+        except Exception as e:
+            logger.error(f"[APP] 統合サマリー生成失敗: {e}")
+            summary_placeholder.warning(f"統合サマリーの生成をスキップしました: {e}")
+
+        # Final Clip結合（VLMが有効でクリップがある場合のみ）
+        if enable_vlm and save_clips and saved_clip_paths:
+            try:
+                video_extractor = init_video_extractor()
+                
+                # 同じ動画のセグメントをグループ化してソート
+                # ファイル名からvideo_idを抽出してグループ化
+                from collections import defaultdict
+                clips_by_video: dict[str, list[Path]] = defaultdict(list)
+                for clip_path in saved_clip_paths:
+                    # ファイル名形式: video_id_segN.mp4
+                    video_id = clip_path.stem.rsplit("_seg", 1)[0]
+                    clips_by_video[video_id].append(clip_path)
+                
+                # グループ内でソートし、フラットなリストに
+                sorted_clips: list[Path] = []
+                for video_id in sorted(clips_by_video.keys()):
+                    clips = sorted(clips_by_video[video_id], key=lambda p: p.stem)
+                    sorted_clips.extend(clips)
+                
+                if len(sorted_clips) > 0:
+                    # 一時ファイルに結合
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".mp4",
+                        delete=False,
+                    ) as tmp:
+                        temp_final = Path(tmp.name)
+                    
+                    success = video_extractor.concat_clips(sorted_clips, temp_final)
+                    
+                    if success and temp_final.exists():
+                        final_path = storage.save_final_clip(session_id, temp_final)
+                        if final_path:
+                            final_clip_placeholder.success(
+                                f"🎬 **結合動画を保存しました**\n\n"
+                                f"📁 `{final_path}`"
+                            )
+                            logger.info(f"[APP] Final clip保存完了: {final_path}")
+                        else:
+                            final_clip_placeholder.warning("動画結合は成功しましたが、保存に失敗しました。")
+                    else:
+                        final_clip_placeholder.warning("動画の結合をスキップしました。")
+                    
+                    # 一時ファイル削除
+                    try:
+                        temp_final.unlink()
+                    except Exception:
+                        pass
+                else:
+                    final_clip_placeholder.empty()
+                    
+            except Exception as e:
+                logger.error(f"[APP] Final clip結合失敗: {e}")
+                final_clip_placeholder.warning(f"動画結合をスキップしました: {e}")
+        elif enable_vlm and save_clips:
+            final_clip_placeholder.empty()
 
     except Exception as e:
         logger.error(f"[APP] エラー発生: {e}", exc_info=True)

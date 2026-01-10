@@ -191,6 +191,9 @@ class SessionStorage:
         result: SearchResult,
         vlm_enabled: bool,
         logs: list[str] | None = None,
+        search_queries: dict[str, str] | None = None,
+        search_videos: list[Video] | None = None,
+        search_stats: dict[str, Any] | None = None,
     ) -> str:
         """
         セッションを保存
@@ -199,6 +202,9 @@ class SessionStorage:
             result: 検索結果
             vlm_enabled: VLM精密分析が有効だったか
             logs: 処理ログのリスト
+            search_queries: 生成された検索クエリ {"original": ..., "optimized": ..., "simplified": ...}
+            search_videos: 検索でヒットした全動画リスト
+            search_stats: 検索統計情報
 
         Returns:
             セッションID
@@ -235,14 +241,102 @@ class SessionStorage:
             with open(session_dir / "log.txt", "w", encoding="utf-8") as f:
                 f.write("\n".join(logs))
 
+        # queries.json - 生成された検索クエリ
+        if search_queries:
+            with open(session_dir / "queries.json", "w", encoding="utf-8") as f:
+                json.dump(search_queries, f, ensure_ascii=False, indent=2)
+
+        # videos.json - 検索でヒットした全動画
+        if search_videos:
+            videos_data = {
+                "count": len(search_videos),
+                "stats": search_stats or {},
+                "videos": [_video_to_dict(v) for v in search_videos],
+            }
+            with open(session_dir / "videos.json", "w", encoding="utf-8") as f:
+                json.dump(videos_data, f, ensure_ascii=False, indent=2)
+
         # clipsディレクトリを作成
         clips_dir = session_dir / "clips"
         clips_dir.mkdir(exist_ok=True)
 
+        # subtitlesディレクトリを作成
+        subtitles_dir = session_dir / "subtitles"
+        subtitles_dir.mkdir(exist_ok=True)
+
         logger.info(f"Session saved: {session_id}")
         return session_id
 
-    def save_clip(self, session_id: str, video_id: str, clip_path: Path) -> Path | None:
+    def save_subtitle(
+        self,
+        session_id: str,
+        video_id: str,
+        subtitle_data: dict[str, Any],
+    ) -> bool:
+        """
+        字幕データをセッションに保存
+
+        Args:
+            session_id: セッションID
+            video_id: 動画ID
+            subtitle_data: 字幕データ（language, chunks等）
+
+        Returns:
+            成功したかどうか
+        """
+        session_dir = self._get_session_dir(session_id)
+        subtitles_dir = session_dir / "subtitles"
+        subtitles_dir.mkdir(exist_ok=True)
+
+        try:
+            with open(subtitles_dir / f"{video_id}.json", "w", encoding="utf-8") as f:
+                json.dump(subtitle_data, f, ensure_ascii=False, indent=2)
+            logger.debug(f"Subtitle saved: {video_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save subtitle: {video_id} - {e}")
+            return False
+
+    def get_session_subtitles(self, session_id: str) -> dict[str, dict[str, Any]]:
+        """セッションの字幕データを取得"""
+        subtitles_dir = self._get_session_dir(session_id) / "subtitles"
+        if not subtitles_dir.exists():
+            return {}
+
+        subtitles = {}
+        for subtitle_file in subtitles_dir.glob("*.json"):
+            video_id = subtitle_file.stem
+            try:
+                with open(subtitle_file, encoding="utf-8") as f:
+                    subtitles[video_id] = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load subtitle: {subtitle_file} - {e}")
+
+        return subtitles
+
+    def get_session_queries(self, session_id: str) -> dict[str, str] | None:
+        """セッションの検索クエリを取得"""
+        queries_path = self._get_session_dir(session_id) / "queries.json"
+        if not queries_path.exists():
+            return None
+        with open(queries_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def get_session_videos(self, session_id: str) -> dict[str, Any] | None:
+        """セッションの検索動画一覧を取得"""
+        videos_path = self._get_session_dir(session_id) / "videos.json"
+        if not videos_path.exists():
+            return None
+        with open(videos_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_clip(
+        self,
+        session_id: str,
+        video_id: str,
+        clip_path: Path,
+        segment_index: int | None = None,
+    ) -> Path | None:
         """
         動画クリップをセッションに保存
 
@@ -250,6 +344,7 @@ class SessionStorage:
             session_id: セッションID
             video_id: 動画ID
             clip_path: 元のクリップファイルパス
+            segment_index: セグメント番号（同一動画で複数セグメントがある場合）
 
         Returns:
             保存先のパス（失敗時はNone）
@@ -258,7 +353,11 @@ class SessionStorage:
         clips_dir = session_dir / "clips"
         clips_dir.mkdir(exist_ok=True)
 
-        dest_path = clips_dir / f"{video_id}.mp4"
+        # セグメント番号がある場合はファイル名に含める
+        if segment_index is not None:
+            dest_path = clips_dir / f"{video_id}_seg{segment_index}.mp4"
+        else:
+            dest_path = clips_dir / f"{video_id}.mp4"
         try:
             shutil.copy2(clip_path, dest_path)
             logger.debug(f"Clip saved: {dest_path}")
@@ -266,6 +365,74 @@ class SessionStorage:
         except Exception as e:
             logger.error(f"Failed to save clip: {e}")
             return None
+
+    def save_integrated_summary(
+        self,
+        session_id: str,
+        summary: str,
+    ) -> bool:
+        """
+        統合サマリーをセッションに保存
+
+        Args:
+            session_id: セッションID
+            summary: 統合サマリーテキスト
+
+        Returns:
+            成功したかどうか
+        """
+        session_dir = self._get_session_dir(session_id)
+        summary_path = session_dir / "integrated_summary.txt"
+
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(summary)
+            logger.debug(f"Integrated summary saved: {summary_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save integrated summary: {e}")
+            return False
+
+    def get_integrated_summary(self, session_id: str) -> str | None:
+        """セッションの統合サマリーを取得"""
+        summary_path = self._get_session_dir(session_id) / "integrated_summary.txt"
+        if not summary_path.exists():
+            return None
+        with open(summary_path, encoding="utf-8") as f:
+            return f.read()
+
+    def save_final_clip(
+        self,
+        session_id: str,
+        clip_path: Path,
+    ) -> Path | None:
+        """
+        結合された最終クリップをセッションに保存
+
+        Args:
+            session_id: セッションID
+            clip_path: 元のクリップファイルパス
+
+        Returns:
+            保存先のパス（失敗時はNone）
+        """
+        session_dir = self._get_session_dir(session_id)
+        dest_path = session_dir / "final_clip.mp4"
+
+        try:
+            shutil.copy2(clip_path, dest_path)
+            logger.info(f"Final clip saved: {dest_path}")
+            return dest_path
+        except Exception as e:
+            logger.error(f"Failed to save final clip: {e}")
+            return None
+
+    def get_final_clip(self, session_id: str) -> Path | None:
+        """セッションの最終クリップパスを取得"""
+        final_clip_path = self._get_session_dir(session_id) / "final_clip.mp4"
+        if not final_clip_path.exists():
+            return None
+        return final_clip_path
 
     def list_sessions(self, limit: int = 50) -> list[SessionMetadata]:
         """

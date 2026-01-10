@@ -129,6 +129,9 @@ class GeminiVLMClient:
 
 質問: {user_query}
 
+【重要】この動画クリップは既に字幕分析で「質問に関連する可能性が高い」と判定された部分です。
+動画の映像・音声を確認し、質問に関連する具体的な言及や説明がどこにあるか特定してください。
+
 以下のJSON形式で回答してください:
 {{
   "start_sec": <クリップ内での開始秒>,
@@ -139,7 +142,10 @@ class GeminiVLMClient:
 
 ルール:
 - start_sec, end_sec はこの動画クリップ内での相対時間（0秒から開始）
-- 該当する部分がない場合は confidence を 0.0 にする
+- 質問に直接関連する部分がある場合、その開始〜終了秒を指定する
+- start_sec と end_sec は必ず異なる値にする（end_sec > start_sec）
+- 最低でも3秒以上の範囲を指定する
+- confidence は関連性の確信度（通常0.7以上が期待される）
 - summary は日本語で100文字以内
 - 映像と音声の両方を考慮して判断する
 
@@ -163,12 +169,24 @@ JSONのみを出力してください:"""
 
             data = json.loads(json_str)
 
-            time_range = TimeRange(
-                start_sec=float(data["start_sec"]),
-                end_sec=float(data["end_sec"]),
-            )
+            start_sec = float(data["start_sec"])
+            end_sec = float(data["end_sec"])
             confidence = float(data["confidence"])
             summary = data["summary"]
+
+            # start_sec == end_sec の場合（VLMが正確な範囲を特定できなかった場合）
+            # 最低3秒の範囲を設定するフォールバック
+            if end_sec <= start_sec:
+                logger.warning(f"[VLM] 無効な時間範囲を修正: {start_sec}s-{end_sec}s -> {start_sec}s-{start_sec + 3}s")
+                end_sec = start_sec + 3.0
+                # 無効な範囲の場合は確信度を下げる
+                if confidence > 0.5:
+                    confidence = 0.5
+
+            time_range = TimeRange(
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
 
             logger.info(f"[VLM] 動画分析完了: {time_range.start_sec:.1f}s-{time_range.end_sec:.1f}s, "
                        f"conf={confidence:.2f}")

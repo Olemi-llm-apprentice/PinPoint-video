@@ -60,3 +60,22 @@ class LLMClient(Protocol):
             [(TimeRange, confidence, summary), ...]
         """
         ...
+
+    def filter_videos_by_title(
+        self,
+        video_titles: list[tuple[str, str]],
+        user_query: str,
+        max_results: int = 10,
+    ) -> list[str]:
+        """
+        タイトルベースで関連性の高い動画をフィルタリング
+
+        Args:
+            video_titles: [(video_id, title), ...] のリスト
+            user_query: ユーザークエリ
+            max_results: 返す最大件数
+
+        Returns:
+            関連性の高い動画のvideo_idリスト
+        """
+        ...

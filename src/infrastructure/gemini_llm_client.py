@@ -278,3 +278,168 @@ JSONのみを出力してください:"""
         except Exception as e:
             logger.error(f"[LLM] APIエラー: {e}")
             raise LLMError(f"LLM API error: {e}") from e
+
+    @trace_llm(name="filter_videos_by_title", metadata={"purpose": "title_relevance_check"})
+    def filter_videos_by_title(
+        self,
+        video_titles: list[tuple[str, str]],  # [(video_id, title), ...]
+        user_query: str,
+        max_results: int = 10,
+    ) -> list[str]:
+        """
+        タイトルベースで関連性の高い動画をフィルタリング
+
+        字幕取得の前に、タイトルで事前フィルタリングすることで
+        APIリクエスト数を削減する
+
+        Args:
+            video_titles: [(video_id, title), ...] のリスト
+            user_query: ユーザークエリ
+            max_results: 返す最大件数
+
+        Returns:
+            関連性の高い動画のvideo_idリスト
+        """
+        if not video_titles:
+            return []
+
+        logger.info(f"[LLM] タイトルフィルタリング開始")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  候補数: {len(video_titles)}件")
+
+        # タイトルリストを整形
+        titles_text = "\n".join(
+            f"{i+1}. [{vid}] {title}"
+            for i, (vid, title) in enumerate(video_titles)
+        )
+
+        prompt = f"""あなたは動画検索の専門家です。
+
+以下の動画タイトル一覧から、ユーザーの質問に関連する可能性が高い動画を選んでください。
+
+ユーザーの質問: {user_query}
+
+動画タイトル一覧:
+{titles_text}
+
+以下のJSON形式で回答してください:
+{{
+  "relevant_video_ids": ["video_id1", "video_id2", ...]
+}}
+
+ルール:
+- 関連性が高そうな動画を最大{max_results}件まで選択
+- タイトルにクエリのキーワードや関連トピックが含まれているものを優先
+- 関連性が低いと判断した動画は含めない
+- video_idは角括弧内の文字列をそのまま使用
+
+JSONのみを出力してください:"""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.query_convert_model,
+                contents=prompt,
+            )
+
+            json_str = response.text.strip()
+            logger.debug(f"  LLM生出力: {json_str}")
+
+            # JSON部分を抽出
+            if json_str.startswith("```"):
+                json_str = json_str.split("```")[1]
+                if json_str.startswith("json"):
+                    json_str = json_str[4:]
+            json_str = json_str.strip()
+
+            data = json.loads(json_str)
+            relevant_ids = data.get("relevant_video_ids", [])
+
+            # 有効なIDのみフィルタ
+            valid_ids = {vid for vid, _ in video_titles}
+            filtered_ids = [vid for vid in relevant_ids if vid in valid_ids]
+
+            logger.info(f"[LLM] タイトルフィルタリング完了: {len(video_titles)}件 → {len(filtered_ids)}件")
+            for vid in filtered_ids[:5]:
+                title = next((t for v, t in video_titles if v == vid), "")
+                logger.debug(f"    [OK] {vid}: {title[:40]}...")
+
+            return filtered_ids[:max_results]
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[LLM] JSONパースエラー、全件を返す: {e}")
+            # フォールバック: 全件を返す
+            return [vid for vid, _ in video_titles[:max_results]]
+        except Exception as e:
+            logger.error(f"[LLM] タイトルフィルタリング失敗: {e}")
+            # エラー時も全件を返す（字幕取得でフィルタされる）
+            return [vid for vid, _ in video_titles[:max_results]]
+
+    @trace_llm(name="generate_integrated_summary", metadata={"purpose": "summary_integration"})
+    def generate_integrated_summary(
+        self,
+        user_query: str,
+        segment_summaries: list[dict],
+    ) -> str:
+        """
+        複数セグメントのサマリーを統合して一つのまとめを生成
+
+        Args:
+            user_query: ユーザーの元のクエリ
+            segment_summaries: セグメント情報のリスト
+                [{"video_title": str, "summary": str, "time_range": str}, ...]
+
+        Returns:
+            統合されたサマリー文
+
+        Raises:
+            LLMError: API呼び出しエラー
+        """
+        if not segment_summaries:
+            return "該当するセグメントが見つかりませんでした。"
+
+        logger.info(f"[LLM] 統合サマリー生成開始")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  セグメント数: {len(segment_summaries)}件")
+
+        # セグメント情報を整形
+        segments_text = "\n".join(
+            f"- 動画「{seg['video_title'][:50]}」({seg['time_range']}): {seg['summary']}"
+            for seg in segment_summaries
+        )
+
+        prompt = f"""あなたは情報整理の専門家です。
+
+以下の複数の動画セグメントから得られた情報を、ユーザーの質問に対する
+一つのまとまった回答として整理してください。
+
+ユーザーの質問: {user_query}
+
+見つかった動画セグメントの内容:
+{segments_text}
+
+ルール:
+- 複数のセグメントの内容を統合して、一つのまとまった回答を作成
+- 重複する情報は統合
+- 動画名や時間範囲は言及しない（ユーザーは内容だけを知りたい）
+- 日本語で200-400文字程度
+- 箇条書きを使って読みやすく整理
+- 「〜についてですが」などの前置きは不要、内容のみ記載
+
+統合サマリー:"""
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.subtitle_analysis_model,
+                contents=prompt,
+            )
+            result = response.text.strip()
+            logger.info(f"[LLM] 統合サマリー生成完了: {len(result)}文字")
+            return result
+
+        except Exception as e:
+            logger.error(f"[LLM] 統合サマリー生成失敗: {e}")
+            # フォールバック: 個別サマリーを結合
+            fallback = "\n".join(
+                f"• {seg['summary']}" for seg in segment_summaries
+            )
+            return f"【個別サマリー】\n{fallback}"
