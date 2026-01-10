@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     ENABLE_VLM_REFINEMENT: bool = True
     MIN_CONFIDENCE: float = 0.3
 
+    # YouTube URL Fallback (字幕取得429エラー時の代替処理)
+    # GeminiにYouTube URLを直接渡して分析する機能
+    ENABLE_YOUTUBE_URL_FALLBACK: bool = True
+    # フォールバック対象の最大動画長（秒）- Geminiの制限上20分程度が実用的
+    YOUTUBE_URL_FALLBACK_MAX_DURATION: int = 1200  # 20分
+
     # Duration filters (seconds)
     DURATION_MIN_SEC: int = 60
     DURATION_MAX_SEC: int = 7200  # 2時間

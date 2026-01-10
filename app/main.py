@@ -78,6 +78,8 @@ def init_usecase() -> ExtractSegmentsUseCase:
             enable_vlm_refinement=settings.ENABLE_VLM_REFINEMENT,
             duration_min_sec=settings.DURATION_MIN_SEC,
             duration_max_sec=settings.DURATION_MAX_SEC,
+            enable_youtube_url_fallback=settings.ENABLE_YOUTUBE_URL_FALLBACK,
+            youtube_url_fallback_max_duration=settings.YOUTUBE_URL_FALLBACK_MAX_DURATION,
         ),
     )
 

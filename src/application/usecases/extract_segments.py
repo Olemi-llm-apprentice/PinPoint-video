@@ -44,6 +44,9 @@ class ExtractSegmentsConfig:
     enable_vlm_refinement: bool = True  # VLM精密化を有効にするか
     duration_min_sec: int = 60  # 最小動画長（秒）
     duration_max_sec: int = 7200  # 最大動画長（秒）= 2時間
+    # YouTube URL フォールバック（字幕取得429エラー時）
+    enable_youtube_url_fallback: bool = True  # フォールバック機能を有効にするか
+    youtube_url_fallback_max_duration: int = 1200  # フォールバック対象の最大動画長（秒）= 20分
 
 
 class ExtractSegmentsUseCase:
@@ -484,9 +487,16 @@ class ExtractSegmentsUseCase:
         
         # 字幕取得
         subtitle = self.subtitle_fetcher.fetch(video.video_id)
+        
         if not subtitle:
-            logger.debug(f"    {video.video_id}: 字幕なし")
-            return [], None
+            # 字幕取得失敗 → フォールバック処理を試行
+            if self._should_use_youtube_url_fallback(video):
+                logger.info(f"    {video.video_id}: 字幕取得失敗、YouTube URLフォールバックを試行")
+                return self._process_with_youtube_url_fallback(video, user_query)
+            else:
+                logger.debug(f"    {video.video_id}: 字幕なし（フォールバック対象外: "
+                           f"動画長={video.duration_sec}s > {self.config.youtube_url_fallback_max_duration}s）")
+                return [], None
         
         logger.debug(f"    {video.video_id}: 字幕取得成功 "
                     f"(lang={subtitle.language_code}, chunks={len(subtitle.chunks)}, "
@@ -530,6 +540,70 @@ class ExtractSegmentsUseCase:
                         f"(min_confidence={self.config.min_confidence})")
 
         return results, subtitle_data
+
+    def _should_use_youtube_url_fallback(self, video: Video) -> bool:
+        """
+        YouTube URLフォールバックを使用すべきか判定
+
+        条件:
+        - フォールバック機能が有効
+        - 動画長が設定された最大値以下
+        """
+        if not self.config.enable_youtube_url_fallback:
+            return False
+        if video.duration_sec > self.config.youtube_url_fallback_max_duration:
+            return False
+        return True
+
+    def _process_with_youtube_url_fallback(
+        self,
+        video: Video,
+        user_query: str,
+    ) -> tuple[list[tuple[Video, TimeRange, float, str]], dict | None]:
+        """
+        YouTube URLを直接LLMに渡して分析（フォールバック処理）
+
+        字幕取得が429エラー等で失敗した場合に使用。
+        Gemini 2.5はYouTube URLを直接理解できる。
+
+        Returns:
+            (結果リスト, None)  # 字幕データは取得できないためNone
+        """
+        try:
+            logger.debug(f"    {video.video_id}: YouTube URL直接分析開始")
+            logger.debug(f"      URL: {video.url}")
+            logger.debug(f"      動画長: {video.duration_sec}s")
+
+            # LLMでYouTube URLを直接分析
+            ranges = self.llm_client.analyze_youtube_video(
+                video_url=video.url,
+                user_query=user_query,
+            )
+
+            logger.debug(f"    {video.video_id}: YouTube URL分析結果 {len(ranges)}件")
+
+            # 確信度フィルタ
+            results = [
+                (video, time_range, confidence, summary)
+                for time_range, confidence, summary in ranges
+                if confidence >= self.config.min_confidence
+            ]
+
+            filtered_out = len(ranges) - len(results)
+            if filtered_out > 0:
+                logger.debug(f"    {video.video_id}: 確信度フィルタで{filtered_out}件除外 "
+                            f"(min_confidence={self.config.min_confidence})")
+
+            if results:
+                logger.info(f"    {video.video_id}: YouTube URLフォールバック成功 ({len(results)}件)")
+            else:
+                logger.debug(f"    {video.video_id}: YouTube URLフォールバック結果なし")
+
+            return results, None  # 字幕データは取得できない
+
+        except Exception as e:
+            logger.warning(f"    {video.video_id}: YouTube URLフォールバック失敗 - {e}")
+            return [], None
 
     def _refine_with_vlm(
         self,

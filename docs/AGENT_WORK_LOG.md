@@ -185,3 +185,66 @@ UI/UX改善とセッション履歴機能の実装
 - LangSmithトレースは毎回新しいIDで記録され、上書きされない
 
 ---
+
+[2026-01-10 16:14:08]
+
+## 作業内容
+
+字幕取得429エラー時のYouTube URLフォールバック機能を実装
+
+### 背景・問題
+
+- YouTubeの字幕APIが429 (Too Many Requests) エラーを返すケースが発生
+- レート制限により字幕取得が失敗すると、動画分析ができなくなる問題
+
+### 実施した作業
+
+1. **設定ファイル拡張** (`config/settings.py`)
+   - `ENABLE_YOUTUBE_URL_FALLBACK` - フォールバック機能のオン/オフ設定
+   - `YOUTUBE_URL_FALLBACK_MAX_DURATION` - フォールバック対象の最大動画長（デフォルト20分=1200秒）
+
+2. **LLMクライアントインターフェース拡張** (`llm_client.py`)
+   - `analyze_youtube_video()` メソッドをProtocolに追加
+
+3. **Gemini LLMクライアント実装** (`gemini_llm_client.py`)
+   - `analyze_youtube_video()` メソッド実装
+   - `types.Part.from_uri()` でYouTube URLを直接Geminiに渡して動画を分析
+   - 字幕と同様のJSON形式でセグメント情報を取得
+
+4. **ユースケース拡張** (`extract_segments.py`)
+   - `ExtractSegmentsConfig` にフォールバック設定を追加
+   - `_should_use_youtube_url_fallback()` - フォールバック使用判定
+   - `_process_with_youtube_url_fallback()` - フォールバック処理実行
+   - `_process_single_video()` で字幕取得失敗時に自動的にフォールバックを試行
+
+5. **設定の反映** (`app/main.py`)
+   - `ExtractSegmentsConfig` にフォールバック設定を渡すように修正
+
+6. **ドキュメント更新** (`.env.example`)
+   - 新しい設定項目の説明を追加
+
+### 変更したファイル
+
+- `config/settings.py` - フォールバック設定を追加
+- `src/application/interfaces/llm_client.py` - analyze_youtube_video メソッド追加
+- `src/infrastructure/gemini_llm_client.py` - YouTube URL直接分析実装
+- `src/application/usecases/extract_segments.py` - フォールバック処理追加
+- `app/main.py` - 設定の反映
+- `.env.example` - 新設定の説明追加
+
+### 動作フロー
+
+1. 字幕取得を試みる
+2. 429エラー等で失敗した場合:
+   - フォールバック機能が有効 (`ENABLE_YOUTUBE_URL_FALLBACK=true`) かつ
+   - 動画長が20分以下の場合
+   → Gemini 2.5にYouTube URLを直接渡して分析
+3. 後続のVLM処理はそのまま実行
+
+### 備考
+
+- Gemini 2.5はYouTube URLを直接理解できるため、字幕なしでも動画内容を分析可能
+- 動画長制限（20分）はGeminiの処理能力と精度を考慮した実用的な値
+- 設定でオン/オフ可能なため、既存動作への影響なし
+
+---

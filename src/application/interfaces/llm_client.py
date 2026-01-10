@@ -79,3 +79,23 @@ class LLMClient(Protocol):
             関連性の高い動画のvideo_idリスト
         """
         ...
+
+    def analyze_youtube_video(
+        self,
+        video_url: str,
+        user_query: str,
+    ) -> list[tuple[TimeRange, float, str]]:
+        """
+        YouTube動画URLを直接LLMに渡して関連範囲を特定
+
+        字幕取得が429エラーで失敗した場合のフォールバック用。
+        Gemini 2.5はYouTube URLを直接理解できる。
+
+        Args:
+            video_url: YouTube動画のURL
+            user_query: ユーザークエリ
+
+        Returns:
+            [(TimeRange, confidence, summary), ...]
+        """
+        ...

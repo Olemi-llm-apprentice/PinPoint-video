@@ -3,6 +3,7 @@
 import json
 
 from google import genai
+from google.genai import types
 
 from src.application.interfaces.llm_client import SearchQueryVariants
 from src.domain.entities import SubtitleChunk, TimeRange
@@ -443,3 +444,115 @@ JSONのみを出力してください:"""
                 f"• {seg['summary']}" for seg in segment_summaries
             )
             return f"【個別サマリー】\n{fallback}"
+
+    @trace_llm(name="analyze_youtube_video", metadata={"purpose": "youtube_url_direct_analysis"})
+    def analyze_youtube_video(
+        self,
+        video_url: str,
+        user_query: str,
+    ) -> list[tuple[TimeRange, float, str]]:
+        """
+        YouTube動画URLを直接Geminiに渡して関連範囲を特定
+
+        字幕取得が429エラーで失敗した場合のフォールバック用。
+        Gemini 2.5はYouTube URLを直接理解できる。
+
+        Args:
+            video_url: YouTube動画のURL
+            user_query: ユーザークエリ
+
+        Returns:
+            [(TimeRange, confidence, summary), ...]
+
+        Raises:
+            LLMError: API呼び出しエラー
+        """
+        logger.info(f"[LLM] YouTube URL直接分析開始")
+        logger.debug(f"  URL: {video_url}")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  モデル: {self.subtitle_analysis_model}")
+
+        prompt = f"""あなたは動画内容分析の専門家です。
+
+この動画を視聴して、ユーザーの質問に関連する部分を特定してください。
+
+ユーザーの質問: {user_query}
+
+以下のJSON形式で回答してください:
+{{
+  "segments": [
+    {{
+      "start_sec": <開始秒>,
+      "end_sec": <終了秒>,
+      "confidence": <0.0-1.0の確信度>,
+      "summary": "<この部分で話されている内容の要約>"
+    }}
+  ]
+}}
+
+ルール:
+- 動画を視聴して、質問に関連する部分を最大3つまで抽出
+- 関連する部分がない場合は空配列を返す
+- start_sec, end_secは動画の時間（秒単位）を正確に指定
+- confidenceは内容の関連性に基づいて設定
+- summaryは日本語で50文字以内
+
+JSONのみを出力してください:"""
+
+        try:
+            # YouTube URLをPart.from_uriで渡す
+            video_part = types.Part.from_uri(
+                file_uri=video_url,
+                mime_type="video/*",
+            )
+
+            response = self.client.models.generate_content(
+                model=self.subtitle_analysis_model,
+                contents=[video_part, prompt],
+            )
+
+            # JSON部分を抽出してパース
+            json_str = response.text.strip()
+            logger.debug(f"  LLM生出力: {json_str[:200]}..." if len(json_str) > 200 else f"  LLM生出力: {json_str}")
+
+            if json_str.startswith("```"):
+                json_str = json_str.split("```")[1]
+                if json_str.startswith("json"):
+                    json_str = json_str[4:]
+            json_str = json_str.strip()
+
+            data = json.loads(json_str)
+
+            results = []
+            for seg in data.get("segments", []):
+                try:
+                    start = float(seg["start_sec"])
+                    end = float(seg["end_sec"])
+                    # 不正な値はスキップ
+                    if start >= end or start < 0:
+                        logger.warning(f"  無効な時間範囲をスキップ: {start}s-{end}s")
+                        continue
+                    time_range = TimeRange(
+                        start_sec=start,
+                        end_sec=end,
+                    )
+                    confidence = float(seg["confidence"])
+                    summary = seg["summary"]
+                    results.append((time_range, confidence, summary))
+                except (KeyError, ValueError) as e:
+                    logger.warning(f"  セグメントのパースエラー: {e}")
+                    continue
+
+            logger.info(f"[LLM] YouTube URL直接分析完了: {len(results)}件")
+            for i, (tr, conf, summ) in enumerate(results):
+                logger.debug(f"    [{i+1}] {tr.start_sec:.1f}s-{tr.end_sec:.1f}s, conf={conf:.2f}, summary={summ[:30]}...")
+
+            return results
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[LLM] JSONパースエラー: {e}")
+            logger.error(f"  生出力: {json_str[:500] if 'json_str' in dir() else 'N/A'}")
+            raise LLMError(f"Failed to parse LLM response as JSON: {e}") from e
+        except Exception as e:
+            logger.error(f"[LLM] YouTube URL分析エラー: {e}")
+            raise LLMError(f"YouTube URL analysis failed: {e}") from e
