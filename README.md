@@ -15,6 +15,8 @@ An AI-powered tool that extracts specific segments from YouTube videos based on 
 - **Time Savings**: 20 min → 40 sec (only the relevant parts)
 - **Precision**: AI-powered content understanding, more accurate than subtitle search
 - **Instant Access**: Timestamped YouTube links for immediate navigation
+- **Integrated Summary**: AI-generated summary combining all relevant segments
+- **Final Clip**: Automatically combined video clip of all relevant segments
 
 ## 📋 Requirements
 
@@ -65,8 +67,20 @@ cp .env.example .env
 
 Edit the `.env` file and set the following API keys:
 
-- `YOUTUBE_API_KEY`: Enable YouTube Data API v3 at [Google Cloud Console](https://console.cloud.google.com/)
-- `GEMINI_API_KEY`: Get from [Google AI Studio](https://aistudio.google.com/)
+#### Required API Keys
+
+| API Key | How to Get | Purpose |
+|---------|------------|---------|
+| `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → Enable YouTube Data API v3 | Search YouTube videos |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) | AI analysis (LLM + VLM) |
+
+#### Optional API Keys
+
+| API Key | How to Get | Purpose |
+|---------|------------|---------|
+| `LANGSMITH_API_KEY` | [LangSmith](https://smith.langchain.com/settings) | Observability & tracing |
+
+> ⚠️ **Note**: YouTube Data API has a daily quota limit (10,000 units/day). Each search uses about 100 units.
 
 ### 4. Run the application
 
@@ -108,13 +122,41 @@ pinpoint_video/
 
 ## 🔄 Processing Flow
 
-1. **Query Conversion** (1-2s): Optimize user query for YouTube search
-2. **YouTube Search** (1-2s): Search and filter relevant videos
-3. **Subtitle Analysis** (2-3s): AI identifies rough time ranges from subtitles
-4. **Precision Analysis** (10-30s/video): Partial download + VLM for precise timestamps
-5. **Display Results**: YouTube embed with timestamps
+1. **Query Conversion** (1-2s): Optimize user query for YouTube search using LLM
+2. **Multi-Strategy YouTube Search** (2-3s): Search with multiple queries and strategies (relevance, date, recent)
+3. **Title Filtering** (1-2s): LLM filters videos by title relevance
+4. **Subtitle Analysis** (2-5s): AI identifies rough time ranges from subtitles
+5. **VLM Precision Analysis** (10-30s/video): Parallel processing with up to 3 concurrent analyses
+   - Partial video download (only relevant segments)
+   - Gemini VLM analyzes actual video content
+   - Automatic retry on failure (up to 3 times)
+6. **Results Generation**:
+   - Individual segment results with timestamps
+   - **Integrated Summary**: AI combines all segment summaries into one
+   - **Final Clip**: All clips merged into a single video file
 
-**Total Processing Time**: 30 seconds to 1 minute
+**Total Processing Time**: 30 seconds to 2 minutes (depending on number of segments)
+
+## 📂 Output Structure
+
+Search results are saved to the `outputs/` directory:
+
+```
+outputs/
+└── 20260110_153324_search_query/
+    ├── result.json          # Search results (segments, timestamps, summaries)
+    ├── result.md            # Markdown format results
+    ├── metadata.json        # Session metadata
+    ├── queries.json         # Generated search queries
+    ├── integrated_summary.txt  # AI-generated combined summary
+    ├── log.txt              # Processing log
+    ├── final_clip.mp4       # Combined video of all segments
+    ├── clips/               # Individual video clips
+    │   ├── videoId_seg0.mp4
+    │   └── videoId_seg1.mp4
+    └── subtitles/           # Downloaded subtitles
+        └── videoId.json
+```
 
 ## 🧪 Running Tests
 
@@ -142,9 +184,11 @@ uv run pytest tests/
 ## ⚠️ Limitations
 
 - Videos without subtitles cannot be processed (Whisper integration planned)
-- Maximum video length: 1 hour (gemini-2.5-flash)
-- Languages: Japanese and English only
+- Maximum video length: 2 hours (gemini-2.5-flash with 1M context)
+- Languages: Japanese and English primarily supported
 - YouTube Data API daily quota limit (10,000 units/day)
+- VLM analysis may fail for very short clips (< 3 seconds)
+- Large videos may take longer to process due to partial downloads
 
 ## 📄 License
 

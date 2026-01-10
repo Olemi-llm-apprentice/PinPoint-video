@@ -15,6 +15,8 @@ YouTube動画から、ユーザーが求める情報が含まれる部分だけ�
 - **時間短縮**: 20分 → 40秒（必要な部分だけ）
 - **精度**: AIによる内容理解で、字幕検索より高精度
 - **即座にアクセス**: タイムスタンプ付きYouTubeリンクで即座に該当部分へ
+- **統合サマリー**: 複数のセグメントを1つのまとめにAIが統合
+- **Final Clip**: 全セグメントを1つの動画ファイルに自動結合
 
 ## 📋 必要条件
 
@@ -65,8 +67,20 @@ cp .env.example .env
 
 `.env` ファイルを編集して、以下のAPIキーを設定してください：
 
-- `YOUTUBE_API_KEY`: [Google Cloud Console](https://console.cloud.google.com/)でYouTube Data API v3を有効化して取得
-- `GEMINI_API_KEY`: [Google AI Studio](https://aistudio.google.com/)で取得
+#### 必須のAPIキー
+
+| APIキー | 取得方法 | 用途 |
+|---------|----------|------|
+| `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → YouTube Data API v3を有効化 | YouTube動画検索 |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/) | AI分析（LLM + VLM） |
+
+#### オプションのAPIキー
+
+| APIキー | 取得方法 | 用途 |
+|---------|----------|------|
+| `LANGSMITH_API_KEY` | [LangSmith](https://smith.langchain.com/settings) | 観測性・トレーシング |
+
+> ⚠️ **注意**: YouTube Data APIには日次クォータ制限があります（10,000ユニット/日）。1回の検索で約100ユニット消費します。
 
 ### 4. アプリケーションを起動
 
@@ -108,13 +122,41 @@ pinpoint_video/
 
 ## 🔄 処理フロー
 
-1. **クエリ変換** (1-2秒): ユーザークエリをYouTube検索に最適化
-2. **YouTube検索** (1-2秒): 関連動画を検索・フィルタリング
-3. **字幕分析** (2-3秒): 字幕からAIで該当範囲を粗く特定
-4. **精密分析** (10-30秒/動画): 部分ダウンロード + VLMで精密時刻特定
-5. **結果表示**: タイムスタンプ付きYouTube埋め込み
+1. **クエリ変換** (1-2秒): LLMでユーザークエリをYouTube検索に最適化
+2. **マルチ戦略YouTube検索** (2-3秒): 複数のクエリと戦略（関連度、日付、最新）で検索
+3. **タイトルフィルタリング** (1-2秒): LLMで動画タイトルの関連性を評価
+4. **字幕分析** (2-5秒): AIで字幕から該当範囲を粗く特定
+5. **VLM精密分析** (10-30秒/動画): 最大3並列で処理
+   - 該当部分のみ部分ダウンロード
+   - Gemini VLMで実際の動画内容を分析
+   - 失敗時は自動リトライ（最大3回）
+6. **結果生成**:
+   - 個別セグメント結果（タイムスタンプ付き）
+   - **統合サマリー**: AIが全セグメントのサマリーを1つに統合
+   - **Final Clip**: 全クリップを1つの動画ファイルに結合
 
-**合計処理時間**: 30秒〜1分
+**合計処理時間**: 30秒〜2分（セグメント数により変動）
+
+## 📂 出力フォルダ構成
+
+検索結果は `outputs/` ディレクトリに保存されます：
+
+```
+outputs/
+└── 20260110_153324_検索クエリ/
+    ├── result.json          # 検索結果（セグメント、タイムスタンプ、サマリー）
+    ├── result.md            # Markdown形式の結果
+    ├── metadata.json        # セッションメタデータ
+    ├── queries.json         # 生成された検索クエリ
+    ├── integrated_summary.txt  # AI生成の統合サマリー
+    ├── log.txt              # 処理ログ
+    ├── final_clip.mp4       # 全セグメントの結合動画
+    ├── clips/               # 個別の動画クリップ
+    │   ├── videoId_seg0.mp4
+    │   └── videoId_seg1.mp4
+    └── subtitles/           # ダウンロードした字幕
+        └── videoId.json
+```
 
 ## 🧪 テスト実行
 
@@ -142,9 +184,11 @@ uv run pytest tests/
 ## ⚠️ 制限事項
 
 - 字幕なし動画は処理不可（将来Whisper統合予定）
-- 動画長上限: 1時間（gemini-2.5-flash）
-- 言語: 日本語・英語のみ
+- 動画長上限: 2時間（gemini-2.5-flashの1Mコンテキスト）
+- 言語: 日本語・英語が主にサポート
 - YouTube Data API の日次クォータ制限（10,000ユニット/日）
+- 非常に短いクリップ（3秒未満）はVLM分析が失敗する可能性あり
+- 長い動画は部分ダウンロードに時間がかかる場合があります
 
 ## 📄 ライセンス
 
