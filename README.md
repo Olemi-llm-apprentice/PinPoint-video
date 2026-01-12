@@ -17,6 +17,7 @@ An AI-powered tool that extracts specific segments from YouTube videos based on 
 - **Instant Access**: Timestamped YouTube links for immediate navigation
 - **Integrated Summary**: AI-generated summary combining all relevant segments
 - **Final Clip**: Automatically combined video clip of all relevant segments
+- **Visual Content**: AI-generated infographics and manga from search results
 
 ## 📋 Requirements
 
@@ -154,8 +155,11 @@ outputs/
     ├── clips/               # Individual video clips
     │   ├── videoId_seg0.mp4
     │   └── videoId_seg1.mp4
-    └── subtitles/           # Downloaded subtitles
-        └── videoId.json
+    ├── subtitles/           # Downloaded subtitles
+    │   └── videoId.json
+    └── generated_images/    # AI-generated visual content
+        ├── infographic.png
+        └── manga.png
 ```
 
 ## 🧪 Running Tests
@@ -172,6 +176,7 @@ uv run pytest tests/
 | `QUERY_CONVERT_MODEL` | (DEFAULT_MODEL) | Model for query conversion |
 | `SUBTITLE_ANALYSIS_MODEL` | (DEFAULT_MODEL) | Model for subtitle analysis |
 | `VIDEO_ANALYSIS_MODEL` | (DEFAULT_MODEL) | Model for video analysis (VLM) |
+| `IMAGE_GENERATION_MODEL` | gemini-3-pro-image-preview | Model for image generation |
 | `MAX_SEARCH_RESULTS` | 30 | Maximum YouTube search results |
 | `MAX_FINAL_RESULTS` | 5 | Number of segments to display |
 | `BUFFER_RATIO` | 0.2 | Buffer ratio for clip extraction |
@@ -183,12 +188,11 @@ uv run pytest tests/
 
 ## ⚠️ Limitations
 
-- Videos without subtitles cannot be processed (Whisper integration planned)
-- Maximum video length: 2 hours (gemini-2.5-flash with 1M context)
+- Videos without subtitles cannot be processed
+- Maximum video length: 2 hours (source video). Gemini processes individual clips (~45 min with audio / ~1 hour without audio per clip)
 - Languages: Japanese and English primarily supported
 - YouTube Data API daily quota limit (10,000 units/day)
 - VLM analysis may fail for very short clips (< 3 seconds)
-- Large videos may take longer to process due to partial downloads
 
 ## 📄 License
 

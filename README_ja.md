@@ -17,6 +17,7 @@ YouTube動画から、ユーザーが求める情報が含まれる部分だけ�
 - **即座にアクセス**: タイムスタンプ付きYouTubeリンクで即座に該当部分へ
 - **統合サマリー**: 複数のセグメントを1つのまとめにAIが統合
 - **Final Clip**: 全セグメントを1つの動画ファイルに自動結合
+- **ビジュアルコンテンツ**: 検索結果からインフォグラフィック・漫画をAI生成
 
 ## 📋 必要条件
 
@@ -154,8 +155,11 @@ outputs/
     ├── clips/               # 個別の動画クリップ
     │   ├── videoId_seg0.mp4
     │   └── videoId_seg1.mp4
-    └── subtitles/           # ダウンロードした字幕
-        └── videoId.json
+    ├── subtitles/           # ダウンロードした字幕
+    │   └── videoId.json
+    └── generated_images/    # AI生成ビジュアルコンテンツ
+        ├── infographic.png
+        └── manga.png
 ```
 
 ## 🧪 テスト実行
@@ -172,6 +176,7 @@ uv run pytest tests/
 | `QUERY_CONVERT_MODEL` | (DEFAULT_MODEL) | クエリ変換用モデル |
 | `SUBTITLE_ANALYSIS_MODEL` | (DEFAULT_MODEL) | 字幕分析用モデル |
 | `VIDEO_ANALYSIS_MODEL` | (DEFAULT_MODEL) | 動画分析用モデル（VLM） |
+| `IMAGE_GENERATION_MODEL` | gemini-3-pro-image-preview | 画像生成用モデル |
 | `MAX_SEARCH_RESULTS` | 30 | YouTube検索結果の最大取得件数 |
 | `MAX_FINAL_RESULTS` | 5 | 最終的に表示するセグメント数 |
 | `BUFFER_RATIO` | 0.2 | クリップ抽出時のバッファ割合 |
@@ -183,12 +188,11 @@ uv run pytest tests/
 
 ## ⚠️ 制限事項
 
-- 字幕なし動画は処理不可（将来Whisper統合予定）
-- 動画長上限: 2時間（gemini-2.5-flashの1Mコンテキスト）
+- 字幕なし動画は処理不可
+- 動画長上限: 2時間（ソース動画）。Geminiは個別クリップを処理（音声あり約45分 / 音声なし約1時間）
 - 言語: 日本語・英語が主にサポート
 - YouTube Data API の日次クォータ制限（10,000ユニット/日）
 - 非常に短いクリップ（3秒未満）はVLM分析が失敗する可能性あり
-- 長い動画は部分ダウンロードに時間がかかる場合があります
 
 ## 📄 ライセンス
 
