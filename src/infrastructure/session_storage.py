@@ -525,3 +525,89 @@ class SessionStorage:
         except Exception as e:
             logger.error(f"Failed to delete session: {session_id} - {e}")
             return False
+
+    def save_generated_image(
+        self,
+        session_id: str,
+        image_type: str,
+        image_data: bytes,
+        prompt: str | None = None,
+    ) -> Path | None:
+        """
+        生成された画像をセッションに保存
+
+        Args:
+            session_id: セッションID
+            image_type: 画像タイプ（"infographic" または "manga"）
+            image_data: 画像のバイトデータ
+            prompt: 生成に使用したプロンプト（漫画の場合）
+
+        Returns:
+            保存先のパス（失敗時はNone）
+        """
+        session_dir = self._get_session_dir(session_id)
+        images_dir = session_dir / "generated_images"
+        images_dir.mkdir(exist_ok=True)
+
+        # 画像を保存
+        image_path = images_dir / f"{image_type}.png"
+        try:
+            with open(image_path, "wb") as f:
+                f.write(image_data)
+            logger.info(f"Generated image saved: {image_path}")
+
+            # プロンプトがあれば保存
+            if prompt:
+                prompt_path = images_dir / f"{image_type}_prompt.txt"
+                with open(prompt_path, "w", encoding="utf-8") as f:
+                    f.write(prompt)
+                logger.debug(f"Prompt saved: {prompt_path}")
+
+            return image_path
+        except Exception as e:
+            logger.error(f"Failed to save generated image: {e}")
+            return None
+
+    def get_generated_image(
+        self,
+        session_id: str,
+        image_type: str,
+    ) -> tuple[Path | None, str | None]:
+        """
+        セッションの生成画像を取得
+
+        Args:
+            session_id: セッションID
+            image_type: 画像タイプ（"infographic" または "manga"）
+
+        Returns:
+            (画像パス, プロンプト) のタプル
+        """
+        session_dir = self._get_session_dir(session_id)
+        images_dir = session_dir / "generated_images"
+
+        image_path = images_dir / f"{image_type}.png"
+        prompt_path = images_dir / f"{image_type}_prompt.txt"
+
+        result_image = image_path if image_path.exists() else None
+        result_prompt = None
+        if prompt_path.exists():
+            try:
+                with open(prompt_path, encoding="utf-8") as f:
+                    result_prompt = f.read()
+            except Exception:
+                pass
+
+        return result_image, result_prompt
+
+    def get_all_generated_images(self, session_id: str) -> dict[str, tuple[Path | None, str | None]]:
+        """
+        セッションの全生成画像を取得
+
+        Returns:
+            {"infographic": (path, prompt), "manga": (path, prompt)} の辞書
+        """
+        return {
+            "infographic": self.get_generated_image(session_id, "infographic"),
+            "manga": self.get_generated_image(session_id, "manga"),
+        }

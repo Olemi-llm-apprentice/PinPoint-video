@@ -4,6 +4,7 @@ import json
 
 from google import genai
 from google.genai import types
+from google.genai.types import Modality
 
 from src.application.interfaces.llm_client import SearchQueryVariants
 from src.domain.entities import SubtitleChunk, TimeRange
@@ -28,12 +29,14 @@ class GeminiLLMClient:
         api_key: str | None = None,
         query_convert_model: str = "gemini-2.5-flash",
         subtitle_analysis_model: str = "gemini-2.5-flash",
+        image_generation_model: str = "gemini-2.0-flash-exp",
     ):
         """
         Args:
             api_key: APIキー。Noneの場合はGEMINI_API_KEY環境変数から自動取得
             query_convert_model: クエリ変換用モデル
             subtitle_analysis_model: 字幕分析用モデル
+            image_generation_model: 画像生成用モデル
         """
         if api_key:
             self.client = genai.Client(api_key=api_key)
@@ -42,6 +45,7 @@ class GeminiLLMClient:
 
         self.query_convert_model = query_convert_model
         self.subtitle_analysis_model = subtitle_analysis_model
+        self.image_generation_model = image_generation_model
 
     @trace_llm(name="convert_to_search_query", metadata={"purpose": "query_optimization"})
     def convert_to_search_query(self, user_query: str) -> str:
@@ -556,3 +560,336 @@ JSONのみを出力してください:"""
         except Exception as e:
             logger.error(f"[LLM] YouTube URL分析エラー: {e}")
             raise LLMError(f"YouTube URL analysis failed: {e}") from e
+
+    @trace_llm(name="generate_infographic", metadata={"purpose": "image_generation"})
+    def generate_infographic(
+        self,
+        video_path: str,
+        user_query: str,
+        integrated_summary: str,
+        segment_summaries: list[dict],
+        subtitle_texts: list[str] | None = None,
+    ) -> bytes | None:
+        """
+        検索結果からインフォグラフィック画像を生成
+
+        Note: gemini-3-pro-image-previewは動画入力をサポートしないため、
+        テキスト情報のみを使用して画像を生成します。
+
+        Args:
+            video_path: 結合動画ファイルのパス（現在未使用）
+            user_query: ユーザーの検索クエリ
+            integrated_summary: 統合サマリー
+            segment_summaries: セグメントサマリーのリスト
+            subtitle_texts: 字幕テキストのリスト（オプション）
+
+        Returns:
+            生成された画像のバイトデータ（失敗時はNone）
+        """
+        logger.info(f"[LLM] インフォグラフィック生成開始")
+        logger.debug(f"  クエリ: {user_query!r}")
+        logger.debug(f"  モデル: {self.image_generation_model}")
+
+        # セグメント情報を整形
+        segments_text = "\n".join(
+            f"• {seg.get('video_title', '')[:30]}... : {seg.get('summary', '')}"
+            for seg in segment_summaries[:5]
+        )
+
+        # 字幕テキストを整形（先頭2000文字まで）
+        subtitle_section = ""
+        if subtitle_texts:
+            combined_subtitles = "\n---\n".join(subtitle_texts)
+            # 長すぎる場合は切り詰め
+            if len(combined_subtitles) > 2000:
+                combined_subtitles = combined_subtitles[:2000] + "..."
+            subtitle_section = f"""
+
+## 動画の字幕内容（参考）
+{combined_subtitles}
+"""
+
+        prompt = f"""あなたはプロのインフォグラフィックデザイナーです。
+
+以下の調査結果を元に、1枚のインフォグラフィックスライドを生成してください。
+
+## 調査クエリ
+{user_query}
+
+## 調査結果サマリー
+{integrated_summary}
+
+## 主要ポイント
+{segments_text}
+{subtitle_section}
+## 画像生成要件
+- **言語**: 日本語テキストを使用
+- **スタイル**: モダンでクリーンなインフォグラフィックデザイン
+- 視覚的な階層構造（タイトル→主要ポイント→結論）
+- アイコンや図解を活用
+- 読みやすいフォントと適切な余白
+- カラフルだが統一感のある配色
+
+## 構成
+1. キャッチーなタイトル（クエリに対する答えを一言で）
+2. 3-5個の主要ポイント（アイコン付き）
+3. 結論・まとめ
+
+上記の要件に基づいて高解像度のインフォグラフィック画像を生成してください。"""
+
+        try:
+            # 画像生成（gemini-3-pro-image-preview用の設定）
+            # Note: このモデルは動画/音声入力をサポートしないため、テキストのみ
+            config = types.GenerateContentConfig(
+                response_modalities=[Modality.TEXT, Modality.IMAGE],
+                image_config=types.ImageConfig(
+                    aspect_ratio="9:16",  # 縦長フォーマット
+                    image_size="2K",
+                ),
+            )
+            response = self.client.models.generate_content(
+                model=self.image_generation_model,
+                contents=prompt,  # テキストプロンプトのみ
+                config=config,
+            )
+
+            # 画像データを抽出
+            image_parts = [part for part in response.parts if part.inline_data]
+            if image_parts:
+                image_data = image_parts[0].inline_data.data
+                logger.info(f"[LLM] インフォグラフィック生成完了: {len(image_data)} bytes")
+                return image_data
+
+            logger.warning("[LLM] 画像データが見つかりません")
+            return None
+
+        except Exception as e:
+            logger.error(f"[LLM] インフォグラフィック生成失敗: {e}")
+            return None
+
+    @trace_llm(name="generate_manga_prompt", metadata={"purpose": "manga_prompt_generation"})
+    def generate_manga_prompt(
+        self,
+        video_path: str,
+        user_query: str,
+        subtitle_texts: list[str] | None = None,
+    ) -> str | None:
+        """
+        動画を分析して漫画生成プロンプトを作成
+
+        Args:
+            video_path: 結合動画ファイルのパス
+            user_query: ユーザーの検索クエリ
+            subtitle_texts: 字幕テキストのリスト（オプション）
+
+        Returns:
+            漫画生成用プロンプト（失敗時はNone）
+        """
+        logger.info(f"[LLM] 漫画プロンプト生成開始")
+        logger.debug(f"  動画パス: {video_path}")
+        logger.debug(f"  クエリ: {user_query!r}")
+
+        # 字幕テキストを整形（先頭3000文字まで）
+        subtitle_section = ""
+        if subtitle_texts:
+            combined_subtitles = "\n---\n".join(subtitle_texts)
+            # 長すぎる場合は切り詰め
+            if len(combined_subtitles) > 3000:
+                combined_subtitles = combined_subtitles[:3000] + "..."
+            subtitle_section = f"""
+
+## 動画の字幕内容（重要な参考情報）
+以下の字幕テキストから、クエリに関連する重要な情報を抽出してください：
+
+{combined_subtitles}
+"""
+
+        prompt = f"""あなたは「情報デザイナー」兼「AIアートディレクター」です。
+私が提供する【動画ファイル（複数クリップの結合）】と【調査クエリ】を元に、**画像生成AIでそのまま使える1ページの情報漫画プロンプト** を作成してください。
+
+## 調査クエリ
+{user_query}
+{subtitle_section}
+
+## あなたのタスク
+1. **動画を分析**: 各クリップから、ユーザーのクエリに関連する重要な情報・ファクトを抽出する。
+2. **情報を整理**: 抽出した情報を、漫画として伝わりやすい順序・構成に再編成する。
+3. **漫画プロンプトを生成**: 下記のフォーマットに従い、1ページの漫画生成プロンプトを出力する。
+
+## 制作要件
+1. **出力形式**:
+   - プロンプトの言語は **英語 (English)** だが、セリフ・テキスト指定のみ **日本語** とすること。
+   - `Vertical 9:16 aspect ratio` を前提とした構成にすること。
+
+2. **情報漫画の構成原則**:
+   - **見出し（タイトル）**: クエリに対する答えが一目でわかるキャッチーなタイトル。
+   - **導入**: 「なぜこの情報が重要か」を1コマで示す。
+   - **本編**: 動画から抽出した3〜5個の重要ポイントを、各コマで視覚的に表現。
+   - **結論/まとめ**: 読者が持ち帰れる「一言メッセージ」で締める。
+
+3. **コマ構成ルール**:
+   - 1ページに **5〜8コマ** を配置。
+   - 情報の重要度に応じてコマのサイズを変える（重要＝大きく）。
+   - アイコン、図解、比較表現を積極的に活用すること。
+   - 視線誘導: 右上 → 左下（日本式）を意識。
+
+## 出力テンプレート
+以下のフォーマットで出力してください：
+
+Generate a high-resolution professional Japanese manga page, FULL COLOR, Vertical 9:16 aspect ratio (Portrait), INFOGRAPHIC STYLE. --ar 9:16
+
+# TOPIC
+- Query: [ユーザーのクエリをここに記載]
+- Key Insight: [動画から得られた最重要ポイント]
+
+# PANEL LAYOUT & VISUALS (5-8 Panels, Top-Right to Bottom-Left)
+
+Panel 1 (Top - Title Banner):
+- Visual: [タイトルと目を引くビジュアル]
+- Text: 「[キャッチーなタイトル]」
+
+Panel 2 (Upper-Right):
+- Visual: [導入・問題提起のビジュアル]
+- Text: 「[なぜこれが重要か]」
+
+Panel 3 (Upper-Left):
+- Visual: [ポイント1のビジュアル・アイコン]
+- Text: 「[ポイント1の説明]」
+
+Panel 4 (Middle-Right):
+- Visual: [ポイント2のビジュアル]
+- Text: 「[ポイント2の説明]」
+
+Panel 5 (Middle-Left):
+- Visual: [ポイント3のビジュアル]
+- Text: 「[ポイント3の説明]」
+
+Panel 6 (Lower):
+- Visual: [補足情報や比較図解]
+- Text: 「[追加ポイント]」
+
+Panel 7 (Bottom - Conclusion):
+- Visual: [まとめのビジュアル、強調表現]
+- Text: 「[結論・持ち帰りメッセージ]」
+
+# STYLE
+- Japanese Manga style, full color, infographic elements, clean design, bold text, icon-based visuals, high contrast, easy to read.
+
+# SOURCE NOTES
+- Based on: [動画の主な情報源・クリップの概要]
+
+---
+
+動画を分析し、上記フォーマットで漫画プロンプトを生成してください。プロンプトのみを出力してください。"""
+
+        try:
+            # 動画ファイルをアップロード
+            video_file = self.client.files.upload(file=video_path)
+            logger.debug(f"  ファイルアップロード完了: {video_file.name}")
+
+            # ファイルがACTIVE状態になるまで待機
+            import time
+            start_time = time.time()
+            while True:
+                file_info = self.client.files.get(name=video_file.name)
+                state = file_info.state.name if hasattr(file_info.state, 'name') else str(file_info.state)
+                if state == "ACTIVE":
+                    break
+                if state == "FAILED" or time.time() - start_time > 120:
+                    raise LLMError(f"File processing failed or timeout: {video_file.name}")
+                time.sleep(1)
+
+            # プロンプト生成
+            response = self.client.models.generate_content(
+                model=self.subtitle_analysis_model,  # テキスト生成なのでsubtitle_analysis_modelを使用
+                contents=[video_file, prompt],
+            )
+
+            manga_prompt = response.text.strip()
+            logger.info(f"[LLM] 漫画プロンプト生成完了: {len(manga_prompt)} chars")
+            return manga_prompt
+
+        except Exception as e:
+            logger.error(f"[LLM] 漫画プロンプト生成失敗: {e}")
+            return None
+
+        finally:
+            # アップロードしたファイルを削除
+            try:
+                self.client.files.delete(name=video_file.name)
+            except Exception:
+                pass
+
+    @trace_llm(name="generate_manga_image", metadata={"purpose": "manga_image_generation"})
+    def generate_manga_image(
+        self,
+        manga_prompt: str,
+    ) -> bytes | None:
+        """
+        漫画プロンプトから画像を生成
+
+        Args:
+            manga_prompt: 漫画生成用プロンプト
+
+        Returns:
+            生成された画像のバイトデータ（失敗時はNone）
+        """
+        logger.info(f"[LLM] 漫画画像生成開始")
+        logger.debug(f"  プロンプト長: {len(manga_prompt)} chars")
+        logger.debug(f"  モデル: {self.image_generation_model}")
+
+        try:
+            # 画像生成（gemini-3-pro-image-preview用の設定）
+            config = types.GenerateContentConfig(
+                response_modalities=[Modality.TEXT, Modality.IMAGE],
+                image_config=types.ImageConfig(
+                    aspect_ratio="9:16",  # 縦長フォーマット
+                    image_size="2K",
+                ),
+            )
+            response = self.client.models.generate_content(
+                model=self.image_generation_model,
+                contents=[manga_prompt],
+                config=config,
+            )
+
+            # 画像データを抽出
+            image_parts = [part for part in response.parts if part.inline_data]
+            if image_parts:
+                image_data = image_parts[0].inline_data.data
+                logger.info(f"[LLM] 漫画画像生成完了: {len(image_data)} bytes")
+                return image_data
+
+            logger.warning("[LLM] 画像データが見つかりません")
+            return None
+
+        except Exception as e:
+            logger.error(f"[LLM] 漫画画像生成失敗: {e}")
+            return None
+
+    def generate_manga(
+        self,
+        video_path: str,
+        user_query: str,
+        subtitle_texts: list[str] | None = None,
+    ) -> tuple[str | None, bytes | None]:
+        """
+        動画から漫画を生成（プロンプト生成 + 画像生成の統合メソッド）
+
+        Args:
+            video_path: 結合動画ファイルのパス
+            user_query: ユーザーの検索クエリ
+            subtitle_texts: 字幕テキストのリスト（オプション）
+
+        Returns:
+            (漫画プロンプト, 画像バイトデータ) のタプル
+        """
+        # Step 1: 漫画プロンプトを生成
+        manga_prompt = self.generate_manga_prompt(video_path, user_query, subtitle_texts)
+        if not manga_prompt:
+            return None, None
+
+        # Step 2: プロンプトから画像を生成
+        image_data = self.generate_manga_image(manga_prompt)
+
+        return manga_prompt, image_data

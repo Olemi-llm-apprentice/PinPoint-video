@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     SUBTITLE_ANALYSIS_MODEL: str | None = None
     # 動画分析用モデル（VLMによる精密時刻特定）
     VIDEO_ANALYSIS_MODEL: str | None = None
+    # 画像生成用モデル（インフォグラフィック・漫画生成）
+    # gemini-3-pro-image-preview: 4K解像度対応、テキストレンダリング改善
+    IMAGE_GENERATION_MODEL: str = "gemini-3-pro-image-preview"
 
     # Processing
     MAX_SEARCH_RESULTS: int = 30
@@ -67,6 +70,7 @@ class Settings(BaseSettings):
             "query_convert": self.QUERY_CONVERT_MODEL,
             "subtitle_analysis": self.SUBTITLE_ANALYSIS_MODEL,
             "video_analysis": self.VIDEO_ANALYSIS_MODEL,
+            "image_generation": self.IMAGE_GENERATION_MODEL,
         }
         return model_map.get(purpose) or self.DEFAULT_MODEL
 

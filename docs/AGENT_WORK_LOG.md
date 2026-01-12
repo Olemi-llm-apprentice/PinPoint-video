@@ -248,3 +248,120 @@ UI/UX改善とセッション履歴機能の実装
 - 設定でオン/オフ可能なため、既存動作への影響なし
 
 ---
+
+[2026-01-10 17:23:04]
+
+## 作業内容
+
+Gemini画像生成機能の実装（インフォグラフィック・漫画）
+
+### 背景・要件
+
+- 検索結果と結合動画（Final Clip）を入力として、視覚的なコンテンツを自動生成したい
+- グラフィックインフォ（1枚スライド）と漫画の2種類を生成
+- 新規検索後と過去ログタブの両方から実行可能にする
+
+### 実施した作業
+
+1. **設定ファイル拡張** (`config/settings.py`)
+   - `IMAGE_GENERATION_MODEL` - 画像生成用モデル設定を追加（デフォルト: gemini-2.0-flash-exp）
+   - `get_model()` メソッドに "image_generation" 用途を追加
+
+2. **LLMクライアント拡張** (`gemini_llm_client.py`)
+   - `__init__` に `image_generation_model` パラメータを追加
+   - `generate_infographic()` - 動画とサマリーからインフォグラフィック画像を生成
+   - `generate_manga_prompt()` - 動画からユーザー指定フォーマットの漫画プロンプトを生成
+   - `generate_manga_image()` - プロンプトから漫画画像を生成
+   - `generate_manga()` - プロンプト生成＋画像生成の統合メソッド
+   - `response_modalities=["IMAGE", "TEXT"]` でGemini画像生成機能を使用
+
+3. **セッションストレージ拡張** (`session_storage.py`)
+   - `save_generated_image()` - 生成画像とプロンプトをセッションに保存
+   - `get_generated_image()` - セッションの生成画像を取得
+   - `get_all_generated_images()` - 全種類の生成画像を取得
+   - 保存先: `outputs/<session_id>/generated_images/`
+
+4. **Streamlit UI拡張** (`app/main.py`)
+   - `generate_visual_content()` - 画像生成のヘルパー関数
+   - 新規検索後: Final Clip結合成功時に自動で画像生成を実行（Phase 3として追加）
+   - 履歴ビュー: 「🎨 ビジュアル」タブを追加
+     - 生成済み画像の表示
+     - 個別の再生成ボタン（インフォグラフィック / 漫画）
+     - 画像ダウンロードボタン
+     - 漫画プロンプトの表示
+
+### 変更したファイル
+
+- `config/settings.py` - IMAGE_GENERATION_MODEL 設定追加
+- `src/infrastructure/gemini_llm_client.py` - 画像生成メソッド追加（4メソッド）
+- `src/infrastructure/session_storage.py` - 画像保存・取得メソッド追加（3メソッド）
+- `app/main.py` - ビジュアルコンテンツ生成UI追加
+
+### 漫画プロンプト仕様
+
+ユーザー指定のフォーマットに従い、以下の構成で出力:
+- 縦長フォーマット（9:16）
+- 日本式視線誘導（右上→左下）
+- 5〜8コマ構成
+- 英語プロンプト＋日本語セリフ
+- タイトル→導入→本編（3-5ポイント）→結論の構成
+
+### 備考
+
+- Gemini 2.0 Flash Experimental を使用（画像生成対応モデル）
+- 動画ファイルはGemini Files APIでアップロード後に分析
+- 生成失敗時も検索結果は正常に保存される（エラーハンドリング実装済み）
+
+---
+
+[2026-01-10 17:30:00]
+
+## 作業内容
+
+画像生成モデルを gemini-3-pro-image-preview に更新
+
+### 背景
+
+- ユーザーから最新モデル `gemini-3-pro-image-preview` の存在を指摘
+- Web検索でAPIリファレンスを確認し、正しい実装に修正
+
+### gemini-3-pro-image-preview の特徴
+
+- 2025年11月リリース（別名: Nano Banana Pro）
+- 4K解像度対応
+- テキストレンダリング改善
+- マルチモーダル入出力対応
+- 会話的な画像編集が可能
+- 注: `gemini-2.5-flash-image-preview` は 2026/1/15 でシャットダウン予定
+
+### 実施した作業
+
+1. **設定ファイル修正** (`config/settings.py`)
+   - デフォルトモデルを `gemini-3-pro-image-preview` に変更
+
+2. **LLMクライアント修正** (`gemini_llm_client.py`)
+   - `GenerateContentConfig` と `Modality` を正式にインポート
+   - 画像生成設定を `Modality.TEXT, Modality.IMAGE` enum を使用するように修正
+   - テキストレスポンスもログ出力するように追加
+
+### 変更したファイル
+
+- `config/settings.py` - デフォルトモデル変更
+- `src/infrastructure/gemini_llm_client.py` - API呼び出し形式を修正
+
+### API使用方法（修正後）
+
+```python
+from google.genai.types import GenerateContentConfig, Modality
+
+config = GenerateContentConfig(
+    response_modalities=[Modality.TEXT, Modality.IMAGE],
+)
+response = client.models.generate_content(
+    model="gemini-3-pro-image-preview",
+    contents=[video_file, prompt],
+    config=config,
+)
+```
+
+---

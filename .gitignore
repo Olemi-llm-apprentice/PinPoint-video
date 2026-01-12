@@ -78,3 +78,4 @@ logs/
 # Session outputs (search history, clips, etc.)
 outputs/
 !outputs/.gitkeep
+.misc/

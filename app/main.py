@@ -85,11 +85,12 @@ def init_usecase() -> ExtractSegmentsUseCase:
 
 
 def init_llm_client() -> GeminiLLMClient:
-    """統合サマリー生成用のLLMクライアントを取得"""
+    """統合サマリー・画像生成用のLLMクライアントを取得"""
     settings = get_settings()
     return GeminiLLMClient(
         api_key=settings.GEMINI_API_KEY,
         subtitle_analysis_model=settings.get_model("subtitle_analysis"),
+        image_generation_model=settings.get_model("image_generation"),
     )
 
 
@@ -100,6 +101,76 @@ def init_video_extractor() -> YtdlpVideoExtractor:
         ffmpeg_path=settings.FFMPEG_PATH,
         ytdlp_path=settings.YTDLP_PATH,
     )
+
+
+def generate_visual_content(
+    session_id: str,
+    final_clip_path: Path,
+    user_query: str,
+    integrated_summary: str,
+    segment_summaries: list[dict],
+) -> tuple[Path | None, Path | None, str | None]:
+    """
+    インフォグラフィックと漫画を生成
+
+    Args:
+        session_id: セッションID
+        final_clip_path: 結合動画のパス
+        user_query: ユーザークエリ
+        integrated_summary: 統合サマリー
+        segment_summaries: セグメントサマリーのリスト
+
+    Returns:
+        (infographic_path, manga_path, manga_prompt) のタプル
+    """
+    llm_client = init_llm_client()
+    infographic_path = None
+    manga_path = None
+    manga_prompt = None
+
+    # 字幕テキストを取得
+    subtitle_texts = []
+    subtitles = storage.get_session_subtitles(session_id)
+    if subtitles:
+        for video_id, sub_data in subtitles.items():
+            full_text = sub_data.get("full_text", "")
+            if full_text:
+                subtitle_texts.append(full_text)
+        logger.debug(f"[APP] 字幕テキスト取得: {len(subtitle_texts)}件")
+
+    # インフォグラフィック生成
+    try:
+        infographic_data = llm_client.generate_infographic(
+            video_path=str(final_clip_path),
+            user_query=user_query,
+            integrated_summary=integrated_summary,
+            segment_summaries=segment_summaries,
+            subtitle_texts=subtitle_texts if subtitle_texts else None,
+        )
+        if infographic_data:
+            infographic_path = storage.save_generated_image(
+                session_id, "infographic", infographic_data
+            )
+            logger.info(f"[APP] インフォグラフィック保存完了: {infographic_path}")
+    except Exception as e:
+        logger.error(f"[APP] インフォグラフィック生成エラー: {e}")
+
+    # 漫画生成
+    try:
+        manga_prompt, manga_data = llm_client.generate_manga(
+            video_path=str(final_clip_path),
+            user_query=user_query,
+            subtitle_texts=subtitle_texts if subtitle_texts else None,
+        )
+        if manga_data:
+            manga_path = storage.save_generated_image(
+                session_id, "manga", manga_data, prompt=manga_prompt
+            )
+            logger.info(f"[APP] 漫画保存完了: {manga_path}")
+    except Exception as e:
+        logger.error(f"[APP] 漫画生成エラー: {e}")
+
+    return infographic_path, manga_path, manga_prompt
 
 
 def render_youtube_embed(video_id: str, start_sec: int, end_sec: int) -> None:
@@ -239,8 +310,8 @@ def render_history_view(session_id: str) -> None:
         st.metric("処理時間", f"{result.processing_time_sec:.1f}秒")
 
     # タブで表示を切り替え
-    tab_results, tab_queries, tab_videos, tab_subtitles, tab_clips, tab_log, tab_markdown = st.tabs([
-        "📊 結果", "🔍 クエリ", "🎥 動画一覧", "📝 字幕", "🎬 クリップ", "📋 ログ", "📄 Markdown"
+    tab_results, tab_queries, tab_videos, tab_subtitles, tab_clips, tab_visual, tab_log, tab_markdown = st.tabs([
+        "📊 結果", "🔍 クエリ", "🎥 動画一覧", "📝 字幕", "🎬 クリップ", "🎨 ビジュアル", "📋 ログ", "📄 Markdown"
     ])
 
     with tab_results:
@@ -335,6 +406,131 @@ def render_history_view(session_id: str) -> None:
                 st.caption("保存されたクリップはありません")
                 if not metadata.vlm_enabled:
                     st.info("VLM精密分析が無効だったため、クリップは保存されていません")
+
+    with tab_visual:
+        st.markdown("### 🎨 ビジュアルコンテンツ")
+        
+        # 既存の生成画像を取得
+        all_images = storage.get_all_generated_images(session_id)
+        infographic_path, infographic_prompt = all_images.get("infographic", (None, None))
+        manga_path, manga_prompt = all_images.get("manga", (None, None))
+        
+        # Final Clipがあれば生成ボタンを表示
+        final_clip_path = storage.get_final_clip(session_id)
+        integrated_summary = storage.get_integrated_summary(session_id)
+        
+        if final_clip_path:
+            # 字幕テキストを取得
+            subtitle_texts = []
+            subtitles = storage.get_session_subtitles(session_id)
+            if subtitles:
+                for video_id, sub_data in subtitles.items():
+                    full_text = sub_data.get("full_text", "")
+                    if full_text:
+                        subtitle_texts.append(full_text)
+            
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("📊 インフォグラフィックを生成", key=f"gen_info_{session_id}", use_container_width=True):
+                    with st.spinner("インフォグラフィックを生成中..."):
+                        try:
+                            llm_client = init_llm_client()
+                            segment_summaries = [
+                                {
+                                    "video_title": seg.video.title,
+                                    "summary": seg.summary,
+                                    "time_range": f"{format_time(seg.time_range.start_sec)} - {format_time(seg.time_range.end_sec)}",
+                                }
+                                for seg in result.segments
+                            ]
+                            infographic_data = llm_client.generate_infographic(
+                                video_path=str(final_clip_path),
+                                user_query=result.query,
+                                integrated_summary=integrated_summary or "",
+                                segment_summaries=segment_summaries,
+                                subtitle_texts=subtitle_texts if subtitle_texts else None,
+                            )
+                            if infographic_data:
+                                infographic_path = storage.save_generated_image(
+                                    session_id, "infographic", infographic_data
+                                )
+                                st.success("インフォグラフィックを生成しました！")
+                                st.rerun()
+                            else:
+                                st.error("画像の生成に失敗しました")
+                        except Exception as e:
+                            st.error(f"エラー: {e}")
+            
+            with col_btn2:
+                if st.button("📖 漫画を生成", key=f"gen_manga_{session_id}", use_container_width=True):
+                    with st.spinner("漫画を生成中..."):
+                        try:
+                            llm_client = init_llm_client()
+                            manga_prompt_new, manga_data = llm_client.generate_manga(
+                                video_path=str(final_clip_path),
+                                user_query=result.query,
+                                subtitle_texts=subtitle_texts if subtitle_texts else None,
+                            )
+                            if manga_data:
+                                manga_path = storage.save_generated_image(
+                                    session_id, "manga", manga_data, prompt=manga_prompt_new
+                                )
+                                st.success("漫画を生成しました！")
+                                st.rerun()
+                            else:
+                                st.error("画像の生成に失敗しました")
+                        except Exception as e:
+                            st.error(f"エラー: {e}")
+            
+            st.markdown("---")
+        else:
+            st.info("📹 ビジュアルコンテンツを生成するには、VLM精密分析を有効にして検索を実行してください。")
+        
+        # 生成済み画像を表示
+        if infographic_path or manga_path:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if infographic_path:
+                    st.markdown("#### 📊 インフォグラフィック")
+                    st.image(str(infographic_path), use_container_width=True)
+                    
+                    # ダウンロードボタン
+                    with open(infographic_path, "rb") as f:
+                        st.download_button(
+                            "📥 ダウンロード",
+                            data=f.read(),
+                            file_name=f"infographic_{session_id[:10]}.png",
+                            mime="image/png",
+                            key=f"dl_info_{session_id}",
+                        )
+                else:
+                    st.caption("インフォグラフィックはまだ生成されていません")
+            
+            with col2:
+                if manga_path:
+                    st.markdown("#### 📖 漫画")
+                    st.image(str(manga_path), use_container_width=True)
+                    
+                    # ダウンロードボタン
+                    with open(manga_path, "rb") as f:
+                        st.download_button(
+                            "📥 ダウンロード",
+                            data=f.read(),
+                            file_name=f"manga_{session_id[:10]}.png",
+                            mime="image/png",
+                            key=f"dl_manga_{session_id}",
+                        )
+                    
+                    # プロンプト表示
+                    if manga_prompt:
+                        with st.expander("🎯 生成プロンプト"):
+                            st.code(manga_prompt, language="text")
+                else:
+                    st.caption("漫画はまだ生成されていません")
+        else:
+            if final_clip_path:
+                st.caption("まだビジュアルコンテンツは生成されていません。上のボタンをクリックして生成してください。")
 
     with tab_log:
         log_content = storage.get_session_log(session_id)
@@ -628,6 +824,7 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
             summary_placeholder.warning(f"統合サマリーの生成をスキップしました: {e}")
 
         # Final Clip結合（VLMが有効でクリップがある場合のみ）
+        final_path = None
         if enable_vlm and save_clips and saved_clip_paths:
             try:
                 video_extractor = init_video_extractor()
@@ -684,6 +881,64 @@ def run_new_search(query: str, enable_vlm: bool, save_clips: bool = True) -> Non
                 final_clip_placeholder.warning(f"動画結合をスキップしました: {e}")
         elif enable_vlm and save_clips:
             final_clip_placeholder.empty()
+
+        # === Phase 3: ビジュアルコンテンツ生成 ===
+        # Final Clipと統合サマリーがある場合に画像生成
+        if final_path and integrated_summary:
+            st.markdown("---")
+            visual_container = st.container()
+            with visual_container:
+                st.markdown("### 🎨 ビジュアルコンテンツ生成")
+                visual_placeholder = st.empty()
+                visual_placeholder.info("📊 インフォグラフィックと漫画を生成中...")
+
+            try:
+                segment_summaries = [
+                    {
+                        "video_title": seg.video.title,
+                        "summary": seg.summary,
+                        "time_range": f"{format_time(seg.time_range.start_sec)} - {format_time(seg.time_range.end_sec)}",
+                    }
+                    for seg in result.segments
+                ]
+
+                infographic_path, manga_path, manga_prompt = generate_visual_content(
+                    session_id=session_id,
+                    final_clip_path=final_path,
+                    user_query=query,
+                    integrated_summary=integrated_summary,
+                    segment_summaries=segment_summaries,
+                )
+
+                visual_placeholder.empty()
+                with visual_container:
+                    if infographic_path or manga_path:
+                        st.success("🎨 ビジュアルコンテンツを生成しました")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if infographic_path:
+                                st.markdown("#### 📊 インフォグラフィック")
+                                st.image(str(infographic_path), use_container_width=True)
+                        with col2:
+                            if manga_path:
+                                st.markdown("#### 📖 漫画")
+                                st.image(str(manga_path), use_container_width=True)
+                                if manga_prompt:
+                                    with st.expander("🎯 生成プロンプト"):
+                                        st.code(manga_prompt, language="text")
+                    else:
+                        st.warning("ビジュアルコンテンツの生成をスキップしました。")
+
+                logger.info(f"[APP] ビジュアルコンテンツ生成完了")
+            except Exception as e:
+                logger.error(f"[APP] ビジュアルコンテンツ生成失敗: {e}")
+                visual_placeholder.warning(f"ビジュアルコンテンツの生成をスキップしました: {e}")
+
+        # 検索完了後、履歴ビューに自動切り替え
+        st.session_state.selected_session = session_id
+        st.session_state.view_mode = "history"
+        st.rerun()
 
     except Exception as e:
         logger.error(f"[APP] エラー発生: {e}", exc_info=True)
