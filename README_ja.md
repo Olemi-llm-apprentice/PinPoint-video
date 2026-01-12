@@ -24,25 +24,22 @@ YouTube動画から、ユーザーが求める情報が含まれる部分だけ�
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (Pythonパッケージマネージャー)
 - ffmpeg (動画処理)
-- yt-dlp (YouTube動画ダウンロード)
 
 ### システム依存のインストール
 
 **Windows (winget):**
 ```powershell
 winget install ffmpeg
-pip install yt-dlp
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install ffmpeg yt-dlp
+brew install ffmpeg
 ```
 
 **Linux (apt):**
 ```bash
 sudo apt-get install ffmpeg
-pip install yt-dlp
 ```
 
 ## 🛠️ セットアップ

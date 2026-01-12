@@ -24,25 +24,22 @@ An AI-powered tool that extracts specific segments from YouTube videos based on 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - ffmpeg (video processing)
-- yt-dlp (YouTube video extraction)
 
 ### System Dependencies Installation
 
 **Windows (winget):**
 ```powershell
 winget install ffmpeg
-pip install yt-dlp
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install ffmpeg yt-dlp
+brew install ffmpeg
 ```
 
 **Linux (apt):**
 ```bash
 sudo apt-get install ffmpeg
-pip install yt-dlp
 ```
 
 ## 🛠️ Setup

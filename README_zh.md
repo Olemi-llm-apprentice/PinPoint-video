@@ -24,25 +24,22 @@
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (Python包管理器)
 - ffmpeg (视频处理)
-- yt-dlp (YouTube视频提取)
 
 ### 系统依赖安装
 
 **Windows (winget):**
 ```powershell
 winget install ffmpeg
-pip install yt-dlp
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install ffmpeg yt-dlp
+brew install ffmpeg
 ```
 
 **Linux (apt):**
 ```bash
 sudo apt-get install ffmpeg
-pip install yt-dlp
 ```
 
 ## 🛠️ 安装配置
